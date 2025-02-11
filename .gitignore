@@ -1,0 +1,13 @@
+.venv/
+__pycache__/
+*.pyc
+*.log
+*.pyo
+*.pyclass
+*.pyw
+.idea
+*.zip
+*.csv
+*.parquet
+
+

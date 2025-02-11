@@ -1,0 +1,31 @@
+# Application Configuration
+
+# Database file record id on Zenodo
+project_data:
+  record_id: "3887306"
+  file_name: "building-data-genome-project-2-v1.0.zip"
+  raw_data_file_path: "./data_sources/raw_data"
+  zip_file_folders_to_extract: ['raw', 'metadata', 'weather']
+  schemas_dir_path: "./schemas"
+
+staging_database:
+  host: "localhost"
+  port: 5432
+  database: "building_energy_staging_db"
+  user: "postgres"
+  password: "postgres"
+
+database:
+  host: "localhost"
+  port: 5432
+  database: "building_energy_db"
+  user: "postgres"
+  password: "postgres"
+
+default_database:
+  host: "localhost"
+  port: 5432
+  database: "postgres"
+  user: "postgres"
+  password: "postgres"
+

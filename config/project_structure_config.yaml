@@ -1,0 +1,30 @@
+# Root folder for the building energy data pipeline project
+# building_energy_data_pipeline:
+  # Folder containing all data sources, both raw and processed
+  data_sources:
+    # Raw data folder: Contains unprocessed data directly from sources
+    raw_data:
+    # Clean data folder: Contains the cleaned data
+    cleaned_data:
+    # Processed data folder: Contains processed data ready for use in reports
+    processed_data:
+    # Source code folder: Contains all scripts and modules for the pipeline
+  src:
+    # Data extraction scripts: Tools to fetch and extract data from various sources
+    data_extraction:
+    # Data transformation scripts: Tools to clean, enrich, and transform raw data
+    data_transformation:
+    # Data loading scripts: Tools to load processed data into storage systems
+    data_loading:
+    # Analytics scripts: Tools for generating reports and insights
+    analytics:
+    # Pipeline: Contains the orchestrator class that will sum the pipeline logic
+    pipeline:
+    # Utility scripts: Tools for utility functions and helper classes
+    utility:
+  # Configuration folder: Contains settings and parameters for the pipeline
+  config:
+  # Logs folder: Contains log files for tracking pipeline execution
+  logs:
+  # Tests folder: Contains unit and integration tests for the pipeline
+  tests:

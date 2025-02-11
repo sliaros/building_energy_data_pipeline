@@ -1,0 +1,5 @@
+pyyaml
+requests
+pandas
+pyarrow
+psycopg2
