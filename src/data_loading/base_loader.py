@@ -9,7 +9,6 @@ class BaseDataLoader(ABC):
     """
 
     @abstractmethod
-    @abstractmethod
     def load_data(
             self,
             file_path: Union[str, Path],
