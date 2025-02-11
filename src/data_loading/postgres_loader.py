@@ -6,8 +6,9 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import time
 import math
 import pandas as pd
+from tqdm import tqdm
 
-from typing import Optional, Dict, Union, List
+from typing import Optional, Dict, Union, List, Tuple
 from pathlib import Path
 
 from .base_loader import BaseDataLoader
@@ -117,6 +118,24 @@ class PostgresDataLoader(BaseDataLoader):
         self._logger.info(f"Created database {self._db_params['database']}")
         return True
 
+    def _get_file_type_and_reader(self, file_path: Union[str, Path]) -> Tuple[str, callable]:
+        """
+        Determine file type and return appropriate reader function.
+
+        Args:
+            file_path: Path to the file
+
+        Returns:
+            Tuple[str, callable]: File type and corresponding reader function
+        """
+        file_path = Path(file_path)
+        if file_path.suffix.lower()=='.parquet':
+            return 'parquet', pd.read_parquet
+        elif file_path.suffix.lower() in ['.csv', '.txt']:
+            return 'csv', pd.read_csv
+        else:
+            raise ValueError(f"Unsupported file type: {file_path.suffix}")
+
     def load_data(
             self,
             file_path: Union[str, Path],
@@ -124,79 +143,162 @@ class PostgresDataLoader(BaseDataLoader):
             chunk_size: int = 100000
     ) -> Dict[str, Union[int, float]]:
         """
-        Load data with comprehensive progress tracking and error handling.
-
-        Returns:
-            Dictionary with loading statistics
+        Load data from CSV or Parquet files with progress tracking.
         """
         start_time = time.time()
         total_rows_loaded = 0
         file_path = Path(file_path)
 
-        self._logger.info(f"Starting data load for {file_path} into table {table_name}")
+        # Determine file type and get appropriate reader
+        file_type, reader_func = self._get_file_type_and_reader(file_path)
+        self._logger.info(f"Processing {file_type} file: {file_path}")
 
-        # Track chunk processing status
+        # Initialize tracking variables
         chunk_statuses: List[Dict] = []
+        processed_chunks = 0
 
-        with ThreadPoolExecutor(max_workers=self._max_workers) as executor:
-            # Prepare chunks and submit to executor
-            future_to_chunk = {}
-            for i, chunk in enumerate(FileProcessor.read_file_chunks(file_path, chunk_size)):
-                future = executor.submit(
-                    self._load_chunk_with_retry,
-                    chunk,
-                    table_name,
-                    i==0  # First chunk replaces table
-                )
-                future_to_chunk[future] = {
-                    'chunk_index': i,
-                    'rows': len(chunk)
-                }
+        try:
+            if file_type=='parquet':
+                # For Parquet, read the file to get total rows
+                df = reader_func(file_path)
+                total_rows = len(df)
+                total_chunks = math.ceil(total_rows / chunk_size)
 
-            # Process completed futures
-            for future in as_completed(future_to_chunk):
-                chunk_info = future_to_chunk[future]
-                try:
-                    # Check and record chunk loading result
-                    result = future.result()
-                    chunk_statuses.append({
-                        'chunk_index': chunk_info['chunk_index'],
-                        'rows': chunk_info['rows'],
-                        'success': True,
-                        'duration': result.get('duration', 0)
-                    })
-                    total_rows_loaded += chunk_info['rows']
-                except Exception as e:
-                    chunk_statuses.append({
-                        'chunk_index': chunk_info['chunk_index'],
-                        'rows': chunk_info['rows'],
-                        'success': False,
-                        'error': str(e)
-                    })
-                    self._logger.error(f"Failed to load chunk {chunk_info['chunk_index']}: {e}")
+                # Create progress bars
+                chunk_pbar = tqdm(total=total_chunks, desc="Chunks Progress", position=0)
+                rows_pbar = tqdm(total=total_rows, desc="Rows Progress", position=1)
 
-        # Final logging and statistics
+                # Process Parquet file in chunks
+                with ThreadPoolExecutor(max_workers=self._max_workers) as executor:
+                    futures = []
+
+                    # Load first chunk to create table
+                    first_chunk = df.iloc[:chunk_size]
+                    self._load_chunk_with_retry(first_chunk, table_name, True)
+                    total_rows_loaded += len(first_chunk)
+                    chunk_pbar.update(1)
+                    rows_pbar.update(len(first_chunk))
+
+                    # Process remaining chunks
+                    for i in range(1, total_chunks):
+                        start_idx = i * chunk_size
+                        end_idx = min((i + 1) * chunk_size, total_rows)
+                        chunk = df.iloc[start_idx:end_idx]
+
+                        future = executor.submit(
+                            self._load_chunk_with_retry,
+                            chunk,
+                            table_name,
+                            False
+                        )
+                        futures.append((future, {'chunk_index': i, 'rows': len(chunk)}))
+
+                    # Process completed futures
+                    for future, chunk_info in futures:
+                        try:
+                            result = future.result()
+                            self._process_chunk_result(chunk_info, result, chunk_statuses,
+                                total_rows_loaded, chunk_pbar, rows_pbar)
+                            total_rows_loaded += chunk_info['rows']
+                        except Exception as e:
+                            self._handle_chunk_error(chunk_info, e, chunk_statuses)
+
+            else:  # CSV file
+                # Process CSV file in chunks
+                with ThreadPoolExecutor(max_workers=self._max_workers) as executor:
+                    futures = []
+
+                    # Read and process first chunk to create table
+                    first_chunk = next(reader_func(file_path, chunksize=chunk_size))
+                    self._load_chunk_with_retry(first_chunk, table_name, True)
+                    total_rows_loaded += len(first_chunk)
+
+                    # Create progress tracking (without total for CSV)
+                    chunk_pbar = tqdm(desc="Chunks Progress", position=0)
+                    rows_pbar = tqdm(desc="Rows Progress", position=1)
+                    chunk_pbar.update(1)
+                    rows_pbar.update(len(first_chunk))
+
+                    # Process remaining chunks
+                    for i, chunk in enumerate(reader_func(file_path, chunksize=chunk_size, skiprows=chunk_size)):
+                        future = executor.submit(
+                            self._load_chunk_with_retry,
+                            chunk,
+                            table_name,
+                            False
+                        )
+                        futures.append((future, {'chunk_index': i + 1, 'rows': len(chunk)}))
+
+                    # Process completed futures
+                    for future, chunk_info in futures:
+                        try:
+                            result = future.result()
+                            self._process_chunk_result(chunk_info, result, chunk_statuses,
+                                total_rows_loaded, chunk_pbar, rows_pbar)
+                            total_rows_loaded += chunk_info['rows']
+                        except Exception as e:
+                            self._handle_chunk_error(chunk_info, e, chunk_statuses)
+
+        finally:
+            # Close progress bars
+            chunk_pbar.close()
+            rows_pbar.close()
+
+        # Calculate and log final statistics
         total_duration = time.time() - start_time
+        stats = self._calculate_statistics(chunk_statuses, total_rows_loaded, total_duration)
+        self._log_load_statistics(table_name, stats)
+        return stats
 
-        # Compute success metrics
+    def _process_chunk_result(self, chunk_info: Dict, result: Dict,
+                              chunk_statuses: List, total_rows_loaded: int,
+                              chunk_pbar: tqdm, rows_pbar: tqdm) -> None:
+        """Helper method to process successful chunk results."""
+        chunk_statuses.append({
+            'chunk_index': chunk_info['chunk_index'],
+            'rows': chunk_info['rows'],
+            'success': True,
+            'duration': result.get('duration', 0)
+        })
+
+        # Update progress bars
+        chunk_pbar.update(1)
+        rows_pbar.update(chunk_info['rows'])
+
+        # Log chunk completion
+        self._logger.info(
+            f"Chunk {chunk_info['chunk_index']} completed: "
+            f"{chunk_info['rows']:,} rows in {result['duration']:.2f}s "
+            f"({chunk_info['rows'] / result['duration']:.0f} rows/s)"
+        )
+
+    def _handle_chunk_error(self, chunk_info: Dict, error: Exception,
+                            chunk_statuses: List) -> None:
+        """Helper method to handle chunk processing errors."""
+        chunk_statuses.append({
+            'chunk_index': chunk_info['chunk_index'],
+            'rows': chunk_info['rows'],
+            'success': False,
+            'error': str(error)
+        })
+        self._logger.error(f"Failed to load chunk {chunk_info['chunk_index']}: {error}")
+
+    def _calculate_statistics(self, chunk_statuses: List,
+                              total_rows_loaded: int,
+                              total_duration: float) -> Dict:
+        """Calculate final loading statistics."""
         successful_chunks = [cs for cs in chunk_statuses if cs['success']]
         failed_chunks = [cs for cs in chunk_statuses if not cs['success']]
 
-        stats = {
+        return {
             'total_rows_loaded': total_rows_loaded,
             'total_duration': total_duration,
-            'chunks_total': len(chunk_statuses),
-            'chunks_successful': len(successful_chunks),
+            'chunks_total': len(chunk_statuses) + 1,  # Add 1 for first chunk
+            'chunks_successful': len(successful_chunks) + 1,
             'chunks_failed': len(failed_chunks),
             'rows_per_second': total_rows_loaded / total_duration if total_duration > 0 else 0
         }
 
-        self._log_load_statistics(table_name, stats)
-
-        if failed_chunks:
-            self._logger.warning(f"{len(failed_chunks)} chunks failed to load")
-
-        return stats
 
     def _load_chunk_with_retry(
             self,
@@ -205,35 +307,27 @@ class PostgresDataLoader(BaseDataLoader):
             is_first_chunk: bool
     ) -> Dict[str, float]:
         """
-        Load a single chunk with retry mechanism and timing.
-
-        Args:
-            df: DataFrame chunk to load
-            table_name: Target table name
-            is_first_chunk: Whether this is the first chunk (replace vs append)
-
-        Returns:
-            Dictionary with loading duration
+        Load a single chunk with improved performance and connection handling.
         """
         for attempt in range(self._max_retries):
             try:
                 start_time = time.time()
 
-                engine = create_engine(self._sqlalchemy_url)
-                with engine.begin() as conn:
+                with self._engine.begin() as conn:
                     df.to_sql(
                         table_name,
                         conn,
                         if_exists='replace' if is_first_chunk else 'append',
                         index=False,
-                        method='multi'
+                        method='multi',
+                        chunksize=10000  # Optimize bulk insert size
                     )
 
                 duration = time.time() - start_time
                 return {'duration': duration}
 
             except (SQLAlchemyError, psycopg2.Error) as e:
-                delay = self._retry_delay * (2 ** attempt)  # Exponential backoff
+                delay = self._retry_delay * (2 ** attempt)
 
                 if attempt < self._max_retries - 1:
                     self._logger.warning(
