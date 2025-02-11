@@ -320,7 +320,7 @@ class PostgresDataLoader(BaseDataLoader):
                         if_exists='replace' if is_first_chunk else 'append',
                         index=False,
                         method='multi',
-                        chunksize=10000  # Optimize bulk insert size
+                        chunksize=100000  # Optimize bulk insert size
                     )
 
                 duration = time.time() - start_time
