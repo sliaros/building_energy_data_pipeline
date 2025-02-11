@@ -1,9 +1,11 @@
 import psycopg2
 from sqlalchemy import create_engine
 from sqlalchemy.engine.url import URL
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import time
+import math
 
-from typing import Optional, Dict, Union
+from typing import Optional, Dict, Union, List
 from pathlib import Path
 
 from .base_loader import BaseDataLoader
@@ -108,31 +110,81 @@ class PostgresDataLoader(BaseDataLoader):
             file_path: Union[str, Path],
             table_name: str,
             chunk_size: int = 100000
-    ) -> None:
+    ) -> Dict[str, Union[int, float]]:
         """
-        Load data into PostgreSQL database in chunks.
+        Load data with comprehensive progress tracking and error handling.
 
-        Args:
-            file_path: Path to source data file
-            table_name: Target database table name
-            chunk_size: Number of rows per batch
+        Returns:
+            Dictionary with loading statistics
         """
+        start_time = time.time()
+        total_rows_loaded = 0
+        file_path = Path(file_path)
+
+        self._logger.info(f"Starting data load for {file_path} into table {table_name}")
+
+        # Track chunk processing status
+        chunk_statuses: List[Dict] = []
+
         with ThreadPoolExecutor(max_workers=self._max_workers) as executor:
-            futures = []
-
+            # Prepare chunks and submit to executor
+            future_to_chunk = {}
             for i, chunk in enumerate(FileProcessor.read_file_chunks(file_path, chunk_size)):
-                futures.append(
-                    executor.submit(
-                        self._load_dataframe_chunk,
-                        chunk,
-                        table_name,
-                        i==0  # First chunk replaces table
-                    )
+                future = executor.submit(
+                    self._load_chunk_with_retry,
+                    chunk,
+                    table_name,
+                    i==0  # First chunk replaces table
                 )
+                future_to_chunk[future] = {
+                    'chunk_index': i,
+                    'rows': len(chunk)
+                }
 
-            # Wait for all chunks to complete
-            for future in futures:
-                future.result()
+            # Process completed futures
+            for future in as_completed(future_to_chunk):
+                chunk_info = future_to_chunk[future]
+                try:
+                    # Check and record chunk loading result
+                    result = future.result()
+                    chunk_statuses.append({
+                        'chunk_index': chunk_info['chunk_index'],
+                        'rows': chunk_info['rows'],
+                        'success': True,
+                        'duration': result.get('duration', 0)
+                    })
+                    total_rows_loaded += chunk_info['rows']
+                except Exception as e:
+                    chunk_statuses.append({
+                        'chunk_index': chunk_info['chunk_index'],
+                        'rows': chunk_info['rows'],
+                        'success': False,
+                        'error': str(e)
+                    })
+                    self._logger.error(f"Failed to load chunk {chunk_info['chunk_index']}: {e}")
+
+        # Final logging and statistics
+        total_duration = time.time() - start_time
+
+        # Compute success metrics
+        successful_chunks = [cs for cs in chunk_statuses if cs['success']]
+        failed_chunks = [cs for cs in chunk_statuses if not cs['success']]
+
+        stats = {
+            'total_rows_loaded': total_rows_loaded,
+            'total_duration': total_duration,
+            'chunks_total': len(chunk_statuses),
+            'chunks_successful': len(successful_chunks),
+            'chunks_failed': len(failed_chunks),
+            'rows_per_second': total_rows_loaded / total_duration if total_duration > 0 else 0
+        }
+
+        self._log_load_statistics(table_name, stats)
+
+        if failed_chunks:
+            self._logger.warning(f"{len(failed_chunks)} chunks failed to load")
+
+        return stats
 
     def _load_dataframe_chunk(
             self,
@@ -268,3 +320,33 @@ class PostgresDataLoader(BaseDataLoader):
         except Exception as e:
             self._logger.error(f"Failed to create table: {str(e)}")
             raise
+
+    def _log_load_statistics(
+            self,
+            table_name: str,
+            stats: Dict[str, Union[int, float]]
+    ):
+        """
+        Log comprehensive loading statistics.
+
+        Args:
+            table_name: Name of the table being loaded
+            stats: Loading statistics dictionary
+        """
+        log_message = (
+            f"Data Load Statistics for Table '{table_name}':\n"
+            f"  Total Rows Loaded: {stats['total_rows_loaded']:,}\n"
+            f"  Total Duration: {stats['total_duration']:.2f} seconds\n"
+            f"  Rows/Second: {stats['rows_per_second']:.2f}\n"
+            f"  Chunks Total: {stats['chunks_total']}\n"
+            f"  Chunks Successful: {stats['chunks_successful']}\n"
+            f"  Chunks Failed: {stats['chunks_failed']}"
+        )
+
+        # Log as info or warning based on success
+        log_method = (
+            self._logger.warning
+            if stats['chunks_failed'] > 0
+            else self._logger.info
+        )
+        log_method(log_message)
