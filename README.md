@@ -1,59 +1,99 @@
+# Enhanced Schema Generator
+
+A robust and efficient tool for generating PostgreSQL schemas from CSV and Parquet files.
+
+## Features
+
+- Support for CSV and Parquet file formats
+- Intelligent data sampling with progress tracking
+- Advanced type inference and schema analysis
+- Comprehensive column profiling
+- SQL optimization suggestions
+- Detailed logging and error handling
+- Command-line interface
+
+## Installation
+
+1. Clone the repository
+2. Create a virtual environment:
+   ```bash
+   python -m venv venv
+   source venv/bin/activate  # On Windows: venv\Scripts\activate
+   ```
+3. Install dependencies:
+   ```bash
+   pip install -r requirements.txt
+   ```
+
+## Usage
+
+### Command Line Interface
+
+Basic usage:
+```bash
+python main.py input_file.csv
+```
+
+With options:
+```bash
+python main.py input_file.parquet \
+    --output schema.sql \
+    --table my_table \
+    --schema my_schema \
+    --sampling-method random \
+    --max-rows 50000 \
+    --sampling-ratio 0.05
+```
+
+### Python API
+
+```python
 from pathlib import Path
-from typing import Optional
-import argparse
-from logging_config import CustomLogger
-from smart_sampler import ProgressiveSmartSampler, SamplingConfig
-from schema_analyzer import EnhancedSchemaAnalyzer
-from sql_generator import EnhancedSQLGenerator
+from schema_generator import SchemaGenerationOrchestrator
+from smart_sampler import SamplingConfig
 
-class SchemaGenerationOrchestrator:
-    """Orchestrates the entire schema generation process"""
-    
-    def __init__(
-        self,
-        input_file: Path,
-        output_file: Optional[Path] = None,
-        table_name: Optional[str] = None,
-        schema_name: str = "public",
-        sampling_config: Optional[SamplingConfig] = None
-    ):
-        self.input_file = Path(input_file)
-        self.output_file = output_file or self.input_file.with_suffix('.sql')
-        self.table_name = table_name or self.input_file.stem
-        self.schema_name = schema_name
-        self.sampling_config = sampling_config or SamplingConfig()
-        self.logger = CustomLogger(__name__).get_logger()
-    
-    def generate(self) -> str:
-        """Execute the schema generation process"""
-        self.logger.info(f"Starting schema generation for {self.input_file}")
-        
-        # Sample data
-        sampler = ProgressiveSmartSampler(self.sampling_config)
-        sample_result = sampler.sample(self.input_file)
-        
-        # Analyze schema
-        analyzer = EnhancedSchemaAnalyzer(
-            sample_result.sample_data,
-            sample_result.schema
-        )
-        columns = analyzer.analyze()
-        
-        # Generate SQL
-        generator = EnhancedSQLGenerator(
-            self.table_name,
-            self.schema_name
-        )
-        sql = generator.generate(columns)
-        
-        # Save to file if specified
-        if self.output_file:
-            self.output_file.write_text(sql)
-            self.logger.info(f"SQL schema saved to {self.output_file}")
-        
-        return sql
+# Configure sampling
+config = SamplingConfig(
+    method="random",
+    max_rows=50000,
+    sampling_ratio=0.05
+)
 
-def main():
-    """Command line interface for schema generation"""
-    parser = argparse.ArgumentParser(
-        description="Generate SQL schema from CSV or Parquet
+# Create orchestrator
+orchestrator = SchemaGenerationOrchestrator(
+    input_file=Path("input_file.csv"),
+    output_file=Path("output.sql"),
+    table_name="my_table",
+    schema_name="my_schema",
+    sampling_config=config
+)
+
+# Generate schema
+sql = orchestrator.generate()
+```
+
+## Key Components
+
+1. **Smart Sampling**: Progressive data sampling with multiple strategies
+2. **Schema Analysis**: Advanced type inference and column profiling
+3. **SQL Generation**: Optimized SQL schema generation with best practices
+4. **Logging**: Comprehensive logging with rotation and formatting
+
+## Logging
+
+Logs are stored in the `logs` directory with the following format:
+- Daily rotation
+- Maximum size: 10MB
+- Keeps last 5 backups
+- Detailed formatting for debugging
+
+## Contributing
+
+1. Fork the repository
+2. Create a feature branch
+3. Make your changes
+4. Submit a pull request
+
+## License
+
+MIT License
