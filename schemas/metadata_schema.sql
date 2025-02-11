@@ -1,5 +1,5 @@
 -- Schema generated for metadata.parquet
--- Generated on 2025-02-11 17:08:24
+-- Generated on 2025-02-11 17:41:36
 -- Number of columns: 32
 
 -- Table Definition

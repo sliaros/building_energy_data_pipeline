@@ -63,8 +63,24 @@ class SchemaAnalysisManager:
         try:
             # Setup paths and names
             file_path = Path(file_path)
-            output_folder = Path(output_folder or self._config['project_data']['schemas_dir_path'])
+            output_folder = Path(output_folder or Path(self._config['project_data']['schemas_dir_path']))
             output_folder.mkdir(parents=True, exist_ok=True)
+            table_name = table_name or SQLSchemaGenerator._derive_table_name(file_path)
+
+            # Prepare output path
+            schema_path = output_folder / f"{table_name}_schema.sql"
+
+            # Handle existing files
+            if schema_path.exists():
+                self._logger.info(f"Schema file exists: {schema_path}")
+                if if_exists=='fail':
+                    self._logger.info(f"Aborting creation of schema: {table_name}")
+                    return {
+                        "table_name": table_name,
+                        "schema_file_path": schema_path
+                    }
+                else:
+                    self._logger.info(f"Replacing schema file: {schema_path}")
 
             # Initialize analyzer components
             analyzer = PostgreSQLSchemaAnalyzer(
@@ -77,29 +93,14 @@ class SchemaAnalysisManager:
             columns = analyzer.analyze_schema(file_path)
 
             # Generate SQL schema
-            generator = SQLSchemaGenerator(table_name)
-            sql_schema = generator.generate_schema(columns, file_path)
-
-            # Prepare output path
-            schema_path = output_folder / f"{generator._derive_table_name(file_path)}_schema.sql"
-
-            # Handle existing files
-            if schema_path.exists():
-                if if_exists=='fail':
-                    self._logger.info(f"Schema file exists: {schema_path}")
-                    return {
-                        "table_name": table_name,
-                        "schema_file_path": schema_path
-                    }
-                else:
-                    self._logger.info(f"Replacing schema file: {schema_path}")
+            sql_schema = SQLSchemaGenerator(table_name).generate_schema(columns, file_path)
 
             # Write schema to file
             schema_path.write_text(sql_schema)
             self._logger.info(f"Schema generated successfully: {schema_path}")
 
             return {
-                "table_name": generator._derive_table_name(file_path),
+                "table_name": table_name,
                 "schema_file_path": schema_path,
                 "column_count": len(columns),
                 "generated_at": datetime.now().isoformat()

@@ -88,27 +88,24 @@ class Orchestrator:
     def load_data(self):
 
         loader = PostgresDataLoader(self._config, self._logger, FileUtils())
+        schema_manager = SchemaAnalysisManager(config=self._config, logger=self._logger)
+
         for folder, files in FileUtils().find_folders_with_extension('data_sources','parquet').items():
             for _file in files:
-                # _scema = loader._generate_schema(_file, if_exists='fail')
-                # _table_name, _scema_file = _scema.values()
-                # loader._create_table(_scema_file,
-                #     _table_name,
-                # if_exists='fail')
-                # loader.load_data(_file, _table_name)
 
-                manager = SchemaAnalysisManager(
-                    config=self._config,
-                    logger = self._logger
-                )
 
                 # Generate schema with custom table name and output location
-                result = manager.generate_schema(
+                _result = schema_manager.generate_schema(
                     file_path=_file,
                     table_name=None,
                     output_folder=None,
                     if_exists="fail"
                 )
 
-                print(result)
+                _table_name, _scema_file = _result['table_name'], _result['schema_file_path']
 
+                loader._create_table(_scema_file,
+                    _table_name,
+                if_exists='fail')
+
+                # loader.load_data(_file, _table_name)
