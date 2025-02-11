@@ -1,9 +1,11 @@
 import psycopg2
 from sqlalchemy import create_engine
 from sqlalchemy.engine.url import URL
+from sqlalchemy.exc import SQLAlchemyError
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import time
 import math
+import pandas as pd
 
 from typing import Optional, Dict, Union, List
 from pathlib import Path
@@ -25,6 +27,8 @@ class PostgresDataLoader(BaseDataLoader):
             logger,
             file_utils,
             max_workers: int = 4,
+            max_retries: int = 3,
+            retry_delay: float = 1.0,
             db_type: str = "staging",
             db_params: Optional[Dict] = None
     ):
@@ -43,10 +47,12 @@ class PostgresDataLoader(BaseDataLoader):
         self._logger = logger
         self._file_utils = file_utils
         self._max_workers = max_workers
+        self._max_retries = max_retries
+        self._retry_delay = retry_delay
 
         self._sampling_strategy = SamplingStrategy(
             method="stratified",
-            max_rows=50000,
+            max_rows=100000,
             sampling_ratio=0.005
         )
 
@@ -54,6 +60,12 @@ class PostgresDataLoader(BaseDataLoader):
         self._sqlalchemy_url = self._postgres_params_to_sqlalchemy_url()
 
         self._verify_connection()
+
+        self._engine = create_engine(
+            self._postgres_params_to_sqlalchemy_url(),
+            pool_size=max_workers,
+            max_overflow=2
+        )
 
     def _get_db_params(self, db_type: str, db_params: Optional[Dict]) -> Dict:
         """
@@ -186,30 +198,55 @@ class PostgresDataLoader(BaseDataLoader):
 
         return stats
 
-    def _load_dataframe_chunk(
+    def _load_chunk_with_retry(
             self,
-            df,
+            df: pd.DataFrame,
             table_name: str,
             is_first_chunk: bool
-    ) -> None:
+    ) -> Dict[str, float]:
         """
-        Load a single DataFrame chunk into the database.
+        Load a single chunk with retry mechanism and timing.
 
         Args:
-            df: DataFrame chunk
+            df: DataFrame chunk to load
             table_name: Target table name
             is_first_chunk: Whether this is the first chunk (replace vs append)
-        """
-        engine = create_engine(self._sqlalchemy_url)
 
-        with engine.begin() as conn:
-            df.to_sql(
-                table_name,
-                conn,
-                if_exists='replace' if is_first_chunk else 'append',
-                index=False,
-                method='multi'
-            )
+        Returns:
+            Dictionary with loading duration
+        """
+        for attempt in range(self._max_retries):
+            try:
+                start_time = time.time()
+
+                engine = create_engine(self._sqlalchemy_url)
+                with engine.begin() as conn:
+                    df.to_sql(
+                        table_name,
+                        conn,
+                        if_exists='replace' if is_first_chunk else 'append',
+                        index=False,
+                        method='multi'
+                    )
+
+                duration = time.time() - start_time
+                return {'duration': duration}
+
+            except (SQLAlchemyError, psycopg2.Error) as e:
+                delay = self._retry_delay * (2 ** attempt)  # Exponential backoff
+
+                if attempt < self._max_retries - 1:
+                    self._logger.warning(
+                        f"Chunk load attempt {attempt + 1} failed. "
+                        f"Retrying in {delay:.2f} seconds. Error: {e}"
+                    )
+                    time.sleep(delay)
+                else:
+                    self._logger.error(
+                        f"Chunk load failed after {self._max_retries} attempts. "
+                        f"Error: {e}"
+                    )
+                    raise
 
     def _postgres_params_to_sqlalchemy_url(self) -> URL:
         """

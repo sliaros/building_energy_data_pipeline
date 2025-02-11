@@ -94,5 +94,5 @@ class Orchestrator:
                 loader._create_table(_scema_file,
                     _table_name,
                 if_exists='fail')
-                # loader.load_data(_file, _table_name)
+                loader.load_data(_file, _table_name)
 
