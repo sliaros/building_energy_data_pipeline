@@ -7,6 +7,7 @@ from src.data_loading.postgres_loader import PostgresDataLoader
 from src.data_transformation.data_transformer import DataTransformer
 from logs.logging_config import setup_logging
 from src.utility.file_utils import FileUtils
+from src.schema_generator.schema_analysis_orchestrator import SchemaAnalysisManager
 import pandas as pd
 
 class Orchestrator:
@@ -89,10 +90,25 @@ class Orchestrator:
         loader = PostgresDataLoader(self._config, self._logger, FileUtils())
         for folder, files in FileUtils().find_folders_with_extension('data_sources','parquet').items():
             for _file in files:
-                _scema = loader._generate_schema(_file, if_exists='fail')
-                _table_name, _scema_file = _scema.values()
-                loader._create_table(_scema_file,
-                    _table_name,
-                if_exists='fail')
+                # _scema = loader._generate_schema(_file, if_exists='fail')
+                # _table_name, _scema_file = _scema.values()
+                # loader._create_table(_scema_file,
+                #     _table_name,
+                # if_exists='fail')
                 # loader.load_data(_file, _table_name)
+
+                manager = SchemaAnalysisManager(
+                    config=self._config,
+                    logger = self._logger
+                )
+
+                # Generate schema with custom table name and output location
+                result = manager.generate_schema(
+                    file_path=_file,
+                    table_name=None,
+                    output_folder=None,
+                    if_exists="fail"
+                )
+
+                print(result)
 

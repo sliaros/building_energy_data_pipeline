@@ -1,23 +1,38 @@
 -- Schema generated for raw.parquet
--- Generated on 2025-02-11 10:43:24
+-- Generated on 2025-02-11 17:08:33
 -- Number of columns: 4
 
 -- Table Definition
 CREATE TABLE IF NOT EXISTS "raw" (
-    "timestamp" VARCHAR(19),
-    "building_id" VARCHAR(29),
-    "meter_reading" DOUBLE PRECISION,
-    "meter" VARCHAR(12)
+    "timestamp" VARCHAR(19) NOT NULL,
+    "building_id" VARCHAR(29) NOT NULL,
+    "meter_reading" NUMERIC(17,16),
+    "meter" VARCHAR(12) NOT NULL
 );
 
--- Notes:
--- 1. Review and adjust data types and constraints as needed
--- 2. Consider adding appropriate primary key constraint
--- 3. Consider adding foreign key constraints if applicable
--- 4. Add indexes based on your query patterns
-
--- Original Type Mappings:
--- timestamp: string -> VARCHAR(19)
--- building_id: string -> VARCHAR(29)
--- meter_reading: double -> DOUBLE PRECISION
--- meter: string -> VARCHAR(12)
+-- Column Information:
+-- timestamp:
+--   Type: object -> VARCHAR(19)
+--   Nullable: False
+--   Unique Values: 7606
+--   Recommendations:
+--
+-- building_id:
+--   Type: object -> VARCHAR(29)
+--   Nullable: False
+--   Unique Values: 1609
+--   Recommendations:
+--
+-- meter_reading:
+--   Type: float64 -> NUMERIC(17,16)
+--   Nullable: True
+--   Unique Values: 6650
+--   Recommendations:
+--
+-- meter:
+--   Type: object -> VARCHAR(12)
+--   Nullable: False
+--   Unique Values: 8
+--   Recommendations:
+--     * Low cardinality - consider using as categorical
+--

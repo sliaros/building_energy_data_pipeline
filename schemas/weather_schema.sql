@@ -1,35 +1,88 @@
 -- Schema generated for weather.parquet
--- Generated on 2025-02-11 10:43:25
+-- Generated on 2025-02-11 17:08:33
 -- Number of columns: 10
 
 -- Table Definition
 CREATE TABLE IF NOT EXISTS "weather" (
-    "timestamp" VARCHAR(19),
-    "site_id" VARCHAR(8),
-    "airtemperature" DOUBLE PRECISION,
-    "cloudcoverage" DOUBLE PRECISION,
-    "dewtemperature" DOUBLE PRECISION,
-    "precipdepth1hr" DOUBLE PRECISION,
-    "precipdepth6hr" DOUBLE PRECISION,
-    "sealvlpressure" DOUBLE PRECISION,
-    "winddirection" DOUBLE PRECISION,
-    "windspeed" DOUBLE PRECISION
+    "timestamp" VARCHAR(19) NOT NULL,
+    "site_id" VARCHAR(8) NOT NULL,
+    "airtemperature" NUMERIC(4,1),
+    "cloudcoverage" SMALLINT,
+    "dewtemperature" NUMERIC(4,1),
+    "precipdepth1hr" SMALLINT,
+    "precipdepth6hr" SMALLINT,
+    "sealvlpressure" NUMERIC(5,1),
+    "winddirection" SMALLINT,
+    "windspeed" NUMERIC(3,1)
 );
 
--- Notes:
--- 1. Review and adjust data types and constraints as needed
--- 2. Consider adding appropriate primary key constraint
--- 3. Consider adding foreign key constraints if applicable
--- 4. Add indexes based on your query patterns
-
--- Original Type Mappings:
--- timestamp: string -> VARCHAR(19)
--- site_id: string -> VARCHAR(8)
--- airtemperature: double -> DOUBLE PRECISION
--- cloudcoverage: double -> DOUBLE PRECISION
--- dewtemperature: double -> DOUBLE PRECISION
--- precipdepth1hr: double -> DOUBLE PRECISION
--- precipdepth6hr: double -> DOUBLE PRECISION
--- sealvlpressure: double -> DOUBLE PRECISION
--- winddirection: double -> DOUBLE PRECISION
--- windspeed: double -> DOUBLE PRECISION
+-- Column Information:
+-- timestamp:
+--   Type: object -> VARCHAR(19)
+--   Nullable: False
+--   Unique Values: 7710
+--   Recommendations:
+--
+-- site_id:
+--   Type: object -> VARCHAR(8)
+--   Nullable: False
+--   Unique Values: 19
+--   Recommendations:
+--     * Low cardinality - consider using as categorical
+--
+-- airtemperature:
+--   Type: float64 -> NUMERIC(4,1)
+--   Nullable: True
+--   Unique Values: 479
+--   Recommendations:
+--     * Low cardinality - consider using as categorical
+--
+-- cloudcoverage:
+--   Type: float64 -> SMALLINT
+--   Nullable: True
+--   Unique Values: 10
+--   Recommendations:
+--     * Low cardinality - consider using as categorical
+--
+-- dewtemperature:
+--   Type: float64 -> NUMERIC(4,1)
+--   Nullable: True
+--   Unique Values: 414
+--   Recommendations:
+--     * Low cardinality - consider using as categorical
+--
+-- precipdepth1hr:
+--   Type: float64 -> SMALLINT
+--   Nullable: True
+--   Unique Values: 62
+--   Recommendations:
+--     * Low cardinality - consider using as categorical
+--
+-- precipdepth6hr:
+--   Type: float64 -> SMALLINT
+--   Nullable: True
+--   Unique Values: 59
+--   Recommendations:
+--     * Low cardinality - consider using as categorical
+--
+-- sealvlpressure:
+--   Type: float64 -> NUMERIC(5,1)
+--   Nullable: True
+--   Unique Values: 536
+--   Recommendations:
+--     * Low cardinality - consider using as categorical
+--
+-- winddirection:
+--   Type: float64 -> SMALLINT
+--   Nullable: True
+--   Unique Values: 38
+--   Recommendations:
+--     * Low cardinality - consider using as categorical
+--
+-- windspeed:
+--   Type: float64 -> NUMERIC(3,1)
+--   Nullable: True
+--   Unique Values: 49
+--   Recommendations:
+--     * Low cardinality - consider using as categorical
+--
