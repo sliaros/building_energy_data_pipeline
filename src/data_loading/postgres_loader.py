@@ -179,7 +179,8 @@ class PostgresDataLoader(BaseDataLoader):
             self,
             file_path: Union[str, Path],
             table_name: Optional[str] = None,
-            output_folder: Optional[Union[str, Path]] = None
+            output_folder: Optional[Union[str, Path]] = None,
+            if_exists: str = 'fail'
     ) -> Optional[Dict[str, Union[str, Path]]]:
         """
         Generate PostgreSQL schema from a data file.
@@ -192,15 +193,25 @@ class PostgresDataLoader(BaseDataLoader):
         Returns:
             Dict with schema generation details
         """
+        assert if_exists in ['fail', 'replace']
+
         try:
             output_folder = output_folder or self._config['project_data']['schemas_dir_path']
             table_name = table_name or SQLSchemaGenerator._derive_table_name(file_path)
 
+            schema_path = Path(output_folder) / f"{table_name}_schema.sql"
+
+            if schema_path.exists():
+                if if_exists == 'fail':
+                    self._logger.info(f"Schema file exists: {schema_path}")
+                    return {f"Table name": table_name,
+                            "Sql schema file path": schema_path}
+                else:
+                    self._logger.info(f"Replacing schema file: {schema_path}")
+
             columns = SchemaAnalyzer(file_path, self._sampling_strategy).analyze()
             generator = SQLSchemaGenerator(table_name)
-
             sql_schema = generator.generate_schema(columns, file_path)
-            schema_path = Path(output_folder) / f"{table_name}_schema.sql"
 
             schema_path.write_text(sql_schema)
 
@@ -211,4 +222,49 @@ class PostgresDataLoader(BaseDataLoader):
 
         except Exception as e:
             self._logger.error(f"Schema generation failed: {e}")
+            raise
+    @staticmethod
+    def _table_exists(conn, table_name):
+        """Check if a table exists in the database."""
+        query = """
+            SELECT EXISTS (
+                SELECT 1
+                FROM pg_tables
+                WHERE tablename = %s
+            );
+        """
+        with conn.cursor() as cur:
+            cur.execute(query, (table_name,))
+            return cur.fetchone()[0]  # Returns True or False
+
+    def _create_table(self,
+                      schema_file: Union[str, Path],
+                      table_name: str,
+                      if_exists: str = 'fail') -> None:
+        """Create a table based on the provided schema file and database connection parameters."""
+        assert if_exists in ['fail', 'replace']
+
+        try:
+            schema_file = Path(schema_file)
+            if not schema_file.exists():
+                raise FileNotFoundError(f"Schema file not found: {schema_file}")
+
+            self._logger.info(f"Creating table {table_name} in database {self._db_params['database']}")
+
+            with psycopg2.connect(**self._db_params) as conn:
+                with open(schema_file, 'r') as f:
+                    sql_schema = f.read()
+                    with conn.cursor() as cur:
+                        if self._table_exists(conn, table_name):
+                            self._logger.info(f"Table {table_name} already exists in database {self._db_params['database']}")
+                            if if_exists == 'replace':
+                                self._logger.info(f"Dropping table {table_name} from database {self._db_params['database']}")
+                                cur.execute(f"DROP TABLE IF EXISTS {table_name}")
+                            else:
+                                self._logger.info(f"Aborting creation of table {table_name} in database {self._db_params['database']}")
+                                return
+                        cur.execute(sql_schema)
+                        self._logger.info(f"Successfully created table {table_name} in database {self._db_params['database']}")
+        except Exception as e:
+            self._logger.error(f"Failed to create table: {str(e)}")
             raise

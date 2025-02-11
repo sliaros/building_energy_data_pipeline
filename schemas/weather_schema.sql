@@ -1,5 +1,5 @@
 -- Schema generated for weather.parquet
--- Generated on 2025-02-09 18:01:02
+-- Generated on 2025-02-11 10:43:25
 -- Number of columns: 10
 
 -- Table Definition

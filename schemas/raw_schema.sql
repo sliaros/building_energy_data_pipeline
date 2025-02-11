@@ -1,5 +1,5 @@
 -- Schema generated for raw.parquet
--- Generated on 2025-02-09 18:01:02
+-- Generated on 2025-02-11 10:43:24
 -- Number of columns: 4
 
 -- Table Definition

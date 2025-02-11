@@ -536,7 +536,8 @@ class SQLSchemaGenerator:
     @staticmethod
     def _derive_table_name(file_path: Path) -> str:
         """Derive a table name from the file path"""
-        base_name = file_path.stem.lower()
+
+        base_name = Path(file_path).stem.lower()
         clean_name = re.sub(r'[^a-zA-Z0-9_]', '_', base_name)
         return f"tbl_{clean_name}" if clean_name[0].isdigit() else clean_name
 

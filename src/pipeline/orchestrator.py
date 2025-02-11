@@ -3,8 +3,8 @@ import yaml
 import logging
 from typing import Dict, Any
 from src.data_extraction.data_extractor import DataExtractor
+from src.data_loading.postgres_loader import PostgresDataLoader
 from src.data_transformation.data_transformer import DataTransformer
-from src.data_loading.data_loader import DataLoader
 from logs.logging_config import setup_logging
 from src.utility.file_utils import FileUtils
 import pandas as pd
@@ -86,13 +86,13 @@ class Orchestrator:
 
     def load_data(self):
 
-        data_loader = DataLoader(self._config, self._logger, FileUtils())
+        loader = PostgresDataLoader(self._config, self._logger, FileUtils())
         for folder, files in FileUtils().find_folders_with_extension('data_sources','parquet').items():
             for _file in files:
-                _scema = data_loader._generate_schema(_file)
+                _scema = loader._generate_schema(_file, if_exists='fail')
                 _table_name, _scema_file = _scema.values()
-                data_loader._create_table(_scema_file,
+                loader._create_table(_scema_file,
                     _table_name,
                 if_exists='fail')
-                data_loader.load_data(_file, _table_name)
+                # loader.load_data(_file, _table_name)
 
