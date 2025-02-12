@@ -1,5 +1,5 @@
 -- Schema generated for weather.parquet
--- Generated on 2025-02-11 17:41:46
+-- Generated on 2025-02-12 08:52:58
 -- Number of columns: 10
 
 -- Table Definition
@@ -20,8 +20,9 @@ CREATE TABLE IF NOT EXISTS "weather" (
 -- timestamp:
 --   Type: object -> VARCHAR(19)
 --   Nullable: False
---   Unique Values: 7710
+--   Unique Values: 17544
 --   Recommendations:
+--     * Low cardinality - consider using as categorical
 --
 -- site_id:
 --   Type: object -> VARCHAR(8)
@@ -33,7 +34,7 @@ CREATE TABLE IF NOT EXISTS "weather" (
 -- airtemperature:
 --   Type: float64 -> NUMERIC(4,1)
 --   Nullable: True
---   Unique Values: 479
+--   Unique Values: 646
 --   Recommendations:
 --     * Low cardinality - consider using as categorical
 --
@@ -47,42 +48,42 @@ CREATE TABLE IF NOT EXISTS "weather" (
 -- dewtemperature:
 --   Type: float64 -> NUMERIC(4,1)
 --   Nullable: True
---   Unique Values: 414
+--   Unique Values: 553
 --   Recommendations:
 --     * Low cardinality - consider using as categorical
 --
 -- precipdepth1hr:
 --   Type: float64 -> SMALLINT
 --   Nullable: True
---   Unique Values: 62
+--   Unique Values: 167
 --   Recommendations:
 --     * Low cardinality - consider using as categorical
 --
 -- precipdepth6hr:
 --   Type: float64 -> SMALLINT
 --   Nullable: True
---   Unique Values: 59
+--   Unique Values: 168
 --   Recommendations:
 --     * Low cardinality - consider using as categorical
 --
 -- sealvlpressure:
 --   Type: float64 -> NUMERIC(5,1)
 --   Nullable: True
---   Unique Values: 536
+--   Unique Values: 756
 --   Recommendations:
 --     * Low cardinality - consider using as categorical
 --
 -- winddirection:
 --   Type: float64 -> SMALLINT
 --   Nullable: True
---   Unique Values: 38
+--   Unique Values: 59
 --   Recommendations:
 --     * Low cardinality - consider using as categorical
 --
 -- windspeed:
 --   Type: float64 -> NUMERIC(3,1)
 --   Nullable: True
---   Unique Values: 49
+--   Unique Values: 73
 --   Recommendations:
 --     * Low cardinality - consider using as categorical
 --

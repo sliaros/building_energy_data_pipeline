@@ -12,8 +12,6 @@ from typing import Optional, Dict, Union, List, Tuple
 from pathlib import Path
 
 from .base_loader import BaseDataLoader
-from .file_processor import FileProcessor
-from src.data_loading.schema_generator import SchemaAnalyzer, SamplingStrategy, SQLSchemaGenerator
 
 
 class PostgresDataLoader(BaseDataLoader):
@@ -51,12 +49,7 @@ class PostgresDataLoader(BaseDataLoader):
         self._max_retries = max_retries
         self._retry_delay = retry_delay
 
-        self._sampling_strategy = SamplingStrategy(
-            method="stratified",
-            max_rows=100000,
-            sampling_ratio=0.005
-        )
-
+        self._sampling_strategy = None
         self._db_params = self._get_db_params(db_type, db_params)
         self._sqlalchemy_url = self._postgres_params_to_sqlalchemy_url()
 
@@ -358,54 +351,9 @@ class PostgresDataLoader(BaseDataLoader):
             database=self._db_params["database"]
         )
 
-    def _generate_schema(
-            self,
-            file_path: Union[str, Path],
-            table_name: Optional[str] = None,
-            output_folder: Optional[Union[str, Path]] = None,
-            if_exists: str = 'fail'
-    ) -> Optional[Dict[str, Union[str, Path]]]:
-        """
-        Generate PostgreSQL schema from a data file.
+    def _generate_schema(self):
+        pass
 
-        Args:
-            file_path: Path to source data file
-            table_name: Optional custom table name
-            output_folder: Optional output directory for schema
-
-        Returns:
-            Dict with schema generation details
-        """
-        assert if_exists in ['fail', 'replace']
-
-        try:
-            output_folder = output_folder or self._config['project_data']['schemas_dir_path']
-            table_name = table_name or SQLSchemaGenerator._derive_table_name(file_path)
-
-            schema_path = Path(output_folder) / f"{table_name}_schema.sql"
-
-            if schema_path.exists():
-                if if_exists == 'fail':
-                    self._logger.info(f"Schema file exists: {schema_path}")
-                    return {f"Table name": table_name,
-                            "Sql schema file path": schema_path}
-                else:
-                    self._logger.info(f"Replacing schema file: {schema_path}")
-
-            columns = SchemaAnalyzer(file_path, self._sampling_strategy).analyze()
-            generator = SQLSchemaGenerator(table_name)
-            sql_schema = generator.generate_schema(columns, file_path)
-
-            schema_path.write_text(sql_schema)
-
-            return {
-                "table_name": table_name,
-                "schema_file_path": schema_path
-            }
-
-        except Exception as e:
-            self._logger.error(f"Schema generation failed: {e}")
-            raise
     @staticmethod
     def _table_exists(conn, table_name):
         """Check if a table exists in the database."""

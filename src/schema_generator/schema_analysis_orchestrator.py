@@ -8,7 +8,6 @@ from .sampling_strategies import BaseSamplingStrategy, RandomSamplingStrategy
 from .shema_analyzer import PostgreSQLSchemaAnalyzer, SQLSchemaGenerator
 from .type_inference_engine import PostgreSQLTypeInference
 
-
 class SchemaAnalysisManager:
     """
     Manages the schema analysis and SQL generation workflow.
