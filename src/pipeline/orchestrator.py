@@ -93,7 +93,6 @@ class Orchestrator:
         for folder, files in FileUtils().find_folders_with_extension('data_sources','parquet').items():
             for _file in files:
 
-
                 # Generate schema with custom table name and output location
                 _result = schema_manager.generate_schema(
                     file_path=_file,
