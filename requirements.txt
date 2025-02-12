@@ -3,3 +3,5 @@ requests
 pandas
 pyarrow
 psycopg2
+sqlalchemy
+tqdm
