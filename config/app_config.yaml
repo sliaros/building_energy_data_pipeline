@@ -7,6 +7,10 @@ project_data:
   raw_data_file_path: "./data_sources/raw_data"
   zip_file_folders_to_extract: ['raw', 'metadata', 'weather']
   schemas_dir_path: "./schemas"
+  temp_dir_path: "./tmp"
+  unique_columns: {'metadata': ['building_id'],
+                   'weather': ['timestamp', 'site_id'],
+                   'raw': ['timestamp', 'building_id', 'meter']}
 
 staging_database:
   host: "localhost"

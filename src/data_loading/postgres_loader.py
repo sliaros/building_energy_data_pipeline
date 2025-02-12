@@ -2,7 +2,7 @@ import psycopg2
 from sqlalchemy import create_engine
 from sqlalchemy.engine.url import URL
 from sqlalchemy.exc import SQLAlchemyError
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor
 import time
 import math
 import pandas as pd
@@ -29,7 +29,8 @@ class PostgresDataLoader(BaseDataLoader):
             max_retries: int = 3,
             retry_delay: float = 1.0,
             db_type: str = "staging",
-            db_params: Optional[Dict] = None
+            db_params: Optional[Dict] = None,
+            temp_dir: str = None
     ):
         """
         Initialize PostgreSQL data loader.
@@ -48,13 +49,16 @@ class PostgresDataLoader(BaseDataLoader):
         self._max_workers = max_workers
         self._max_retries = max_retries
         self._retry_delay = retry_delay
+        self._temp_dir = Path(temp_dir) or Path(self._config['temp_dir_path'])
 
         self._sampling_strategy = None
         self._db_params = self._get_db_params(db_type, db_params)
         self._sqlalchemy_url = self._postgres_params_to_sqlalchemy_url()
 
-        self._verify_connection()
+        # Ensure temp directory exists
+        self._temp_dir.mkdir(parents=True, exist_ok=True)
 
+        self._verify_connection()
         self._engine = create_engine(
             self._postgres_params_to_sqlalchemy_url(),
             pool_size=max_workers,
@@ -111,32 +115,16 @@ class PostgresDataLoader(BaseDataLoader):
         self._logger.info(f"Created database {self._db_params['database']}")
         return True
 
-    def _get_file_type_and_reader(self, file_path: Union[str, Path]) -> Tuple[str, callable]:
-        """
-        Determine file type and return appropriate reader function.
-
-        Args:
-            file_path: Path to the file
-
-        Returns:
-            Tuple[str, callable]: File type and corresponding reader function
-        """
-        file_path = Path(file_path)
-        if file_path.suffix.lower()=='.parquet':
-            return 'parquet', pd.read_parquet
-        elif file_path.suffix.lower() in ['.csv', '.txt']:
-            return 'csv', pd.read_csv
-        else:
-            raise ValueError(f"Unsupported file type: {file_path.suffix}")
-
     def load_data(
             self,
             file_path: Union[str, Path],
             table_name: str,
-            chunk_size: int = 100000
-    ) -> Dict[str, Union[int, float]]:
+            chunk_size: int = 100000,
+            unique_columns: Optional[List[str]] = None
+    ) -> dict | None:
         """
-        Load data from CSV or Parquet files with progress tracking.
+        Enhanced data loading with deduplication support.
+        Maintains original functionality while adding optimizations.
         """
         start_time = time.time()
         total_rows_loaded = 0
@@ -146,11 +134,14 @@ class PostgresDataLoader(BaseDataLoader):
         file_type, reader_func = self._get_file_type_and_reader(file_path)
         self._logger.info(f"Processing {file_type} file: {file_path}")
 
-        # Initialize tracking variables
-        chunk_statuses: List[Dict] = []
-        processed_chunks = 0
+        # Create staging table name
+        staging_table = f"{table_name}_staging_{int(time.time())}"
 
         try:
+            # Initialize tracking variables
+            chunk_statuses: List[Dict] = []
+            processed_chunks = 0
+
             if file_type=='parquet':
                 # For Parquet, read the file to get total rows
                 df = reader_func(file_path)
@@ -161,28 +152,24 @@ class PostgresDataLoader(BaseDataLoader):
                 chunk_pbar = tqdm(total=total_chunks, desc="Chunks Progress", position=0)
                 rows_pbar = tqdm(total=total_rows, desc="Rows Progress", position=1)
 
-                # Process Parquet file in chunks
+                # Create staging table with first chunk
+                first_chunk = df.iloc[:chunk_size]
+                self._create_staging_table(first_chunk, staging_table)
+
+                # Process chunks with optimized loading
                 with ThreadPoolExecutor(max_workers=self._max_workers) as executor:
                     futures = []
 
-                    # Load first chunk to create table
-                    first_chunk = df.iloc[:chunk_size]
-                    self._load_chunk_with_retry(first_chunk, table_name, True)
-                    total_rows_loaded += len(first_chunk)
-                    chunk_pbar.update(1)
-                    rows_pbar.update(len(first_chunk))
-
-                    # Process remaining chunks
-                    for i in range(1, total_chunks):
+                    for i in range(total_chunks):
                         start_idx = i * chunk_size
                         end_idx = min((i + 1) * chunk_size, total_rows)
                         chunk = df.iloc[start_idx:end_idx]
 
                         future = executor.submit(
-                            self._load_chunk_with_retry,
+                            self._load_chunk_optimized,
                             chunk,
-                            table_name,
-                            False
+                            staging_table,
+                            i
                         )
                         futures.append((future, {'chunk_index': i, 'rows': len(chunk)}))
 
@@ -190,58 +177,172 @@ class PostgresDataLoader(BaseDataLoader):
                     for future, chunk_info in futures:
                         try:
                             result = future.result()
-                            self._process_chunk_result(chunk_info, result, chunk_statuses,
-                                total_rows_loaded, chunk_pbar, rows_pbar)
+                            self._process_chunk_result(
+                                chunk_info, result, chunk_statuses,
+                                total_rows_loaded, chunk_pbar, rows_pbar
+                            )
                             total_rows_loaded += chunk_info['rows']
                         except Exception as e:
                             self._handle_chunk_error(chunk_info, e, chunk_statuses)
 
             else:  # CSV file
-                # Process CSV file in chunks
+                # Process CSV file in chunks with staging table
+                chunk_pbar = tqdm(desc="Chunks Progress", position=0)
+                rows_pbar = tqdm(desc="Rows Progress", position=1)
+
+                # Create staging table with first chunk
+                first_chunk = next(reader_func(file_path, chunksize=chunk_size))
+                self._create_staging_table(first_chunk, staging_table)
+
                 with ThreadPoolExecutor(max_workers=self._max_workers) as executor:
                     futures = []
 
-                    # Read and process first chunk to create table
-                    first_chunk = next(reader_func(file_path, chunksize=chunk_size))
-                    self._load_chunk_with_retry(first_chunk, table_name, True)
-                    total_rows_loaded += len(first_chunk)
-
-                    # Create progress tracking (without total for CSV)
-                    chunk_pbar = tqdm(desc="Chunks Progress", position=0)
-                    rows_pbar = tqdm(desc="Rows Progress", position=1)
-                    chunk_pbar.update(1)
-                    rows_pbar.update(len(first_chunk))
-
-                    # Process remaining chunks
-                    for i, chunk in enumerate(reader_func(file_path, chunksize=chunk_size, skiprows=chunk_size)):
+                    for i, chunk in enumerate(reader_func(file_path, chunksize=chunk_size)):
                         future = executor.submit(
-                            self._load_chunk_with_retry,
+                            self._load_chunk_optimized,
                             chunk,
-                            table_name,
-                            False
+                            staging_table,
+                            i
                         )
-                        futures.append((future, {'chunk_index': i + 1, 'rows': len(chunk)}))
+                        futures.append((future, {'chunk_index': i, 'rows': len(chunk)}))
 
                     # Process completed futures
                     for future, chunk_info in futures:
                         try:
                             result = future.result()
-                            self._process_chunk_result(chunk_info, result, chunk_statuses,
-                                total_rows_loaded, chunk_pbar, rows_pbar)
+                            self._process_chunk_result(
+                                chunk_info, result, chunk_statuses,
+                                total_rows_loaded, chunk_pbar, rows_pbar
+                            )
                             total_rows_loaded += chunk_info['rows']
                         except Exception as e:
                             self._handle_chunk_error(chunk_info, e, chunk_statuses)
+
+            # Merge staging table to final table with deduplication
+            if unique_columns:
+                self._merge_with_deduplication(staging_table, table_name, unique_columns)
+            else:
+                self._merge_without_deduplication(staging_table, table_name)
 
         finally:
             # Close progress bars
             chunk_pbar.close()
             rows_pbar.close()
 
+            # Cleanup
+            self._cleanup_staging(staging_table)
+
         # Calculate and log final statistics
         total_duration = time.time() - start_time
         stats = self._calculate_statistics(chunk_statuses, total_rows_loaded, total_duration)
         self._log_load_statistics(table_name, stats)
         return stats
+
+    def _create_staging_table(self, first_chunk: pd.DataFrame, staging_table: str):
+        """Create a staging table based on the first chunk's structure."""
+        with self._engine.begin() as conn:
+            # Create unlogged table for better performance
+            conn.execute(f"""
+                CREATE UNLOGGED TABLE {staging_table} (
+                    LIKE {first_chunk.columns[0]} INCLUDING ALL
+                )
+            """)
+
+    def _load_chunk_optimized(
+            self,
+            df: pd.DataFrame,
+            staging_table: str,
+            chunk_index: int
+    ) -> dict|None:
+        """
+        Load a single chunk using COPY for better performance.
+        """
+        start_time = time.time()
+        temp_csv = self._temp_dir / f"{staging_table}_chunk_{chunk_index}.csv"
+
+        try:
+            # Write chunk to temporary CSV
+            df.to_csv(temp_csv, index=False, header=False, sep=',')
+
+            # Use COPY command for faster loading
+            with self._engine.raw_connection() as conn:
+                with conn.cursor() as cursor:
+                    with open(temp_csv, 'r') as f:
+                        cursor.copy_from(
+                            f,
+                            staging_table,
+                            sep=',',
+                            null=''
+                        )
+                    conn.commit()
+
+            duration = time.time() - start_time
+            return {'duration': duration}
+
+        finally:
+            # Cleanup temporary CSV
+            if temp_csv.exists():
+                temp_csv.unlink()
+
+    def _merge_with_deduplication(
+            self,
+            staging_table: str,
+            final_table: str,
+            unique_columns: List[str]
+    ):
+        """Merge staging table to final table with deduplication."""
+        unique_constraint = ','.join(unique_columns)
+        columns = self._get_table_columns(final_table)
+        update_columns = [c for c in columns if c not in unique_columns]
+
+        merge_query = f"""
+            INSERT INTO {final_table} ({','.join(columns)})
+            SELECT DISTINCT ON ({unique_constraint}) {','.join(columns)}
+            FROM {staging_table}
+            ON CONFLICT ({unique_constraint}) DO UPDATE
+            SET {','.join(f'{col} = EXCLUDED.{col}' for col in update_columns)}
+        """
+
+        with self._engine.begin() as conn:
+            conn.execute(merge_query)
+
+    def _merge_without_deduplication(self, staging_table: str, final_table: str):
+        """Merge staging table to final table without deduplication."""
+        merge_query = f"""
+            INSERT INTO {final_table}
+            SELECT * FROM {staging_table}
+        """
+        with self._engine.begin() as conn:
+            conn.execute(merge_query)
+
+    def _cleanup_staging(self, staging_table: str):
+        """Clean up staging table."""
+        with self._engine.begin() as conn:
+            conn.execute(f"DROP TABLE IF EXISTS {staging_table}")
+
+    def _get_table_columns(self, table_name: str) -> List[str]:
+        """Get list of columns for a table."""
+        query = """
+            SELECT column_name 
+            FROM information_schema.columns 
+            WHERE table_name = %s 
+            ORDER BY ordinal_position
+        """
+        with self._engine.raw_connection() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute(query, (table_name,))
+                return [row[0] for row in cursor.fetchall()]
+
+    # Maintain all original utility methods
+    def _get_file_type_and_reader(self, file_path: Union[str, Path]) -> Tuple[str, callable]:
+        """Determine file type and return appropriate reader function."""
+        file_path = Path(file_path)
+        if file_path.suffix.lower()=='.parquet':
+            return 'parquet', pd.read_parquet
+        elif file_path.suffix.lower() in ['.csv', '.txt']:
+            return 'csv', pd.read_csv
+        else:
+            raise ValueError(f"Unsupported file type: {file_path.suffix}")
 
     def _process_chunk_result(self, chunk_info: Dict, result: Dict,
                               chunk_statuses: List, total_rows_loaded: int,
@@ -298,7 +399,7 @@ class PostgresDataLoader(BaseDataLoader):
             df: pd.DataFrame,
             table_name: str,
             is_first_chunk: bool
-    ) -> Dict[str, float]:
+    ) -> Dict | None:
         """
         Load a single chunk with improved performance and connection handling.
         """
@@ -351,7 +452,7 @@ class PostgresDataLoader(BaseDataLoader):
             database=self._db_params["database"]
         )
 
-    def _generate_schema(self):
+    def _generate_schema(self, file_path: Union[str, Path]):
         pass
 
     @staticmethod
