@@ -36,7 +36,7 @@ class BaseDataLoader(ABC):
         pass
 
     @abstractmethod
-    def _generate_schema(self, file_path: Union[str, Path]) -> Optional[Dict[str, Union[str, Path]]]:
+    def _generate_schema(self, file_path: Union[str, Path, None]) -> Optional[Dict[str, Union[str, Path]]]:
         """
         Generate database schema from a data file.
 

@@ -106,5 +106,11 @@ class Orchestrator:
                 loader._create_table(_scema_file,
                     _table_name,
                 if_exists='fail')
+                print(self._config['project_data']['unique_columns'][_table_name])
 
-                # loader.load_data(_file, _table_name)
+                loader.load_data(
+                    _file,
+                    _table_name,
+                    chunk_size=200000,
+                    unique_columns=self._config['project_data']['unique_columns'][_table_name]
+                )

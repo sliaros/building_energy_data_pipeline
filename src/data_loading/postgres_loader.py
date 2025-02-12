@@ -49,7 +49,7 @@ class PostgresDataLoader(BaseDataLoader):
         self._max_workers = max_workers
         self._max_retries = max_retries
         self._retry_delay = retry_delay
-        self._temp_dir = Path(temp_dir) or Path(self._config['temp_dir_path'])
+        self._temp_dir =  Path(self._config['project_data']['temp_dir_path']) if temp_dir is None else Path(temp_dir)
 
         self._sampling_strategy = None
         self._db_params = self._get_db_params(db_type, db_params)
