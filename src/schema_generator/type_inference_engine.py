@@ -43,8 +43,6 @@ class PostgreSQLTypeInference(BaseTypeInference):
         'price': 'NUMERIC(15,2)',
         'amount': 'NUMERIC(15,2)',
         'cost': 'NUMERIC(15,2)',
-        'id': 'BIGINT',
-        '_id': 'BIGINT',
         'zip': 'VARCHAR(10)',
         'zipcode': 'VARCHAR(10)',
         'postal': 'VARCHAR(10)',
@@ -52,7 +50,31 @@ class PostgreSQLTypeInference(BaseTypeInference):
         'phone': 'VARCHAR(20)',
     }
 
+    def __init__(self, sample_size: int = 10000):
+        self.sample_size = sample_size
+
+    def _get_predefined_type(self, column_name: str) -> Optional[str]:
+        """Check if column name matches known patterns"""
+        column_lower = column_name.lower()
+
+        # Direct matches
+        if column_lower in self.COLUMN_TYPE_PATTERNS:
+            return self.COLUMN_TYPE_PATTERNS[column_lower]
+
+        # Pattern matches
+        for pattern, sql_type in self.COLUMN_TYPE_PATTERNS.items():
+            if pattern in column_lower:
+                return sql_type
+
+        return None
+
     def infer_type(self, data: pd.Series, column_name: str) -> str:
+        """Infer the SQL type with enhanced handling for numeric types"""
+        # Check for predefined types first
+        predefined_type = self._get_predefined_type(column_name)
+        if predefined_type:
+            return predefined_type
+
         if data.empty:
             return SQLType.TEXT.value
 
@@ -62,10 +84,12 @@ class PostgreSQLTypeInference(BaseTypeInference):
         # Numeric type inference
         if pd.api.types.is_numeric_dtype(data):
             # Check if all values are integers
-            is_integer = non_null.apply(lambda x: isinstance(x, (int, np.integer)) or float(x).is_integer()).all()
+            is_integer = non_null.apply(
+                lambda x: isinstance(x, (int, np.integer)) or
+                          (isinstance(x, float) and x.is_integer())
+            ).all()
 
             if is_integer:
-
                 max_val = non_null.max()
                 min_val = non_null.min()
 
@@ -75,23 +99,23 @@ class PostgreSQLTypeInference(BaseTypeInference):
                     return SQLType.INTEGER.value
                 return SQLType.BIGINT.value
 
-            # Handle floating-point numbers
+            # Handle floating-point numbers more conservatively
             decimal_places = non_null.apply(
-                lambda x: len(str(x).split('.')[-1]) if '.' in str(x) and not str(x).endswith(".0") else 0
+                lambda x: len(str(float(x)).split('.')[-1])
+                if '.' in str(float(x)) and not str(float(x)).endswith('.0')
+                else 0
             ).max()
 
             if decimal_places==0:
-                return SQLType.INTEGER.value  # Edge case where numbers look like floats but are whole numbers
+                return SQLType.INTEGER.value
 
-            # If precision is limited, use REAL or DOUBLE PRECISION
-            if decimal_places <= 6:
-                return SQLType.REAL.value
-            if decimal_places <= 15:
+            # Use DOUBLE PRECISION for most floating-point numbers
+            if 'price' in column_name.lower() or 'amount' in column_name.lower():
+                return 'NUMERIC(15,2)'
+            elif decimal_places <= 6:
+                return 'NUMERIC(12,6)'  # Good for coordinates and most measurements
+            else:
                 return SQLType.DOUBLE_PRECISION.value
-
-            # For very precise decimals, use NUMERIC
-            total_digits = non_null.apply(lambda x: len(str(x).replace('.', ''))).max()
-            return f"{SQLType.NUMERIC.value}({total_digits},{decimal_places})"
 
         # Boolean type
         if pd.api.types.is_bool_dtype(data):

@@ -303,8 +303,9 @@ class PostgresDataLoader(BaseDataLoader):
                     return df
 
                 # Integer columns that need special handling
-                integer_columns = ['site_id_kaggle', 'building_id_kaggle','sqft', 'yearbuilt', 'numberoffloors']
-                float_columns = ['sqft', 'yearbuilt']
+                integer_columns = ['site_id_kaggle', 'building_id_kaggle','sqft',
+                                   'yearbuilt', 'numberoffloors',
+                                   'occupants']
 
                 df = apply_to_columns(df, integer_columns, convert_to_numeric_int64)
 
