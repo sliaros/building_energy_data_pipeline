@@ -1,4 +1,5 @@
 import psycopg2
+from psycopg2 import pool
 from sqlalchemy import create_engine
 from sqlalchemy.engine.url import URL
 from sqlalchemy.exc import SQLAlchemyError
@@ -48,6 +49,13 @@ class PostgresDataLoader(BaseDataLoader):
                 max_overflow=2
             )
 
+            self._pool = pool.SimpleConnectionPool(
+                minconn=1,
+                maxconn=self._max_workers + 2,
+                **self._db_params
+            )
+            self._logger.info(f"Created connection pool with max {max_workers + 2} connections.")
+
             # Create temp directory for chunk files
             self._temp_dir = tempfile.mkdtemp()
             self._logger.info(f"Created temporary directory at {self._temp_dir}")
@@ -58,8 +66,13 @@ class PostgresDataLoader(BaseDataLoader):
                 if hasattr(self, '_temp_dir') and os.path.exists(self._temp_dir):
                     shutil.rmtree(self._temp_dir)
                     self._logger.info(f"Cleaned up temporary directory {self._temp_dir}")
+
+                    # **Close the connection pool**
+                if hasattr(self, '_pool'):
+                    self._pool.closeall()
+                    self._logger.info("Closed all connections in the pool.")
             except Exception as e:
-                self._logger.error(f"Failed to cleanup temporary directory: {e}")
+                self._logger.error(f"Cleanup failed: {e}")
 
     def _get_db_params(self, db_type: str, db_params: Optional[Dict]) -> Dict:
         """
@@ -243,8 +256,20 @@ class PostgresDataLoader(BaseDataLoader):
         return stats
 
     def _get_connection(self):
-        """Get a raw psycopg2 connection using the current database parameters."""
-        return psycopg2.connect(**self._db_params)
+        """Get a connection from the pool instead of creating a new one."""
+        try:
+            return self._pool.getconn()
+        except Exception as e:
+            self._logger.error(f"Failed to get a connection from the pool: {e}")
+            raise
+
+    def _release_connection(self, conn):
+        """Return the connection back to the pool."""
+        try:
+            if conn:
+                self._pool.putconn(conn)
+        except Exception as e:
+            self._logger.error(f"Failed to return connection to pool: {e}")
 
     def _create_staging_table(self, source_table: str, staging_table: str):
         """Create a staging table based on the source table schema."""
@@ -255,7 +280,7 @@ class PostgresDataLoader(BaseDataLoader):
                 conn.commit()
             self._logger.info(f"Created staging table {staging_table}")
         finally:
-            conn.close()
+            self._release_connection(conn)
 
     def _process_chunk_with_retry(
             self,
@@ -346,7 +371,7 @@ class PostgresDataLoader(BaseDataLoader):
                             )
                         conn.commit()
                 finally:
-                    conn.close()
+                    self._release_connection(conn)
 
                 duration = time.time() - start_time
 
@@ -533,10 +558,7 @@ class PostgresDataLoader(BaseDataLoader):
 
         finally:
             if conn:
-                try:
-                    conn.close()
-                except Exception as close_error:
-                    self._logger.error(f"Error closing connection: {close_error}")
+                self._release_connection(conn)
 
     def _cleanup_staging(self, staging_table: str):
         """Drop the staging table."""
@@ -547,7 +569,7 @@ class PostgresDataLoader(BaseDataLoader):
                 conn.commit()
             self._logger.info(f"Dropped staging table {staging_table}")
         finally:
-            conn.close()
+            self._release_connection(conn)
 
     def _process_chunk_result(self, chunk_info: Dict, result: Dict,
                               chunk_statuses: List, total_rows_loaded: int,
