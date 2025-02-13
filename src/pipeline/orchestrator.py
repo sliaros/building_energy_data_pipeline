@@ -98,15 +98,14 @@ class Orchestrator:
                     file_path=_file,
                     table_name=None,
                     output_folder=None,
-                    if_exists="fail"
+                    if_exists="replace"
                 )
 
                 _table_name, _scema_file = _result['table_name'], _result['schema_file_path']
 
                 loader._create_table(_scema_file,
                     _table_name,
-                if_exists='fail')
-                print(self._config['project_data']['unique_columns'][_table_name])
+                if_exists='replace')
 
                 loader.load_data(
                     _file,

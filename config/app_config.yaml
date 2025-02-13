@@ -15,14 +15,14 @@ project_data:
 staging_database:
   host: "localhost"
   port: 5432
-  database: "building_energy_staging_db"
+  database: "building_energy_staging_db_v2"
   user: "postgres"
   password: "postgres"
 
 database:
   host: "localhost"
   port: 5432
-  database: "building_energy_db"
+  database: "building_energy_db_v2"
   user: "postgres"
   password: "postgres"
 
