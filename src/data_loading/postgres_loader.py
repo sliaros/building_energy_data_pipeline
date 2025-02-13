@@ -373,48 +373,170 @@ class PostgresDataLoader(BaseDataLoader):
                     )
                     raise
 
+    def _ensure_unique_constraint(self, target_table: str, unique_columns: List[str], cur):
+        """
+        Ensure a unique constraint exists on the target table.
+        """
+        try:
+            columns_str = ", ".join(unique_columns)
+            constraint_name = f"uq_{target_table}_{'_'.join(unique_columns)}"
+
+            # Check if the unique constraint already exists
+            cur.execute(f"""
+                SELECT conname
+                FROM pg_constraint
+                WHERE conrelid = '{target_table}'::regclass
+                AND contype = 'u';
+            """)
+            existing_constraints = [row[0] for row in cur.fetchall()]
+
+            if constraint_name not in existing_constraints:
+                self._logger.info(f"Creating unique constraint {constraint_name} on {target_table} ({columns_str})")
+                cur.execute(f"""
+                    ALTER TABLE {target_table}
+                    ADD CONSTRAINT {constraint_name} UNIQUE ({columns_str});
+                """)
+        except Exception as e:
+            self._logger.error(f"Failed to create unique constraint: {e}")
+            raise
+
     def _merge_staging_to_final(
             self,
             staging_table: str,
             target_table: str,
             unique_columns: Optional[List[str]] = None
     ):
-        """Merge data from staging to final table with deduplication."""
-        conn = self._get_connection()
+        """Merge data from staging to final table with deduplication and proper transaction handling."""
+        conn = None
         try:
+            conn = self._get_connection()
+            conn.autocommit = False  # Ensure we're in transaction mode
+
             with conn.cursor() as cur:
-                if unique_columns:
-                    # Create unique constraint if it doesn't exist
-                    constraint_name = f"{target_table}_unique_constraint"
-                    columns_str = ", ".join(unique_columns)
-                    try:
-                        cur.execute(f"""
-                            ALTER TABLE {target_table}
-                            ADD CONSTRAINT {constraint_name}
-                            UNIQUE ({columns_str});
-                        """)
-                    except psycopg2.Error:
-                        # Constraint might already exist
-                        pass
+                try:
+                    # Get total number of rows in staging
+                    cur.execute(f"SELECT COUNT(*) FROM {staging_table}")
+                    total_rows = cur.fetchone()[0]
+                    self._logger.info(f"Starting merge of {total_rows:,} rows from {staging_table} to {target_table}")
 
-                    # Insert with conflict handling
-                    cur.execute(f"""
-                        INSERT INTO {target_table}
-                        SELECT DISTINCT ON ({columns_str}) *
-                        FROM {staging_table}
-                        ON CONFLICT ({columns_str}) DO NOTHING
-                    """)
-                else:
-                    # Simple insert if no unique constraints
-                    cur.execute(f"""
-                        INSERT INTO {target_table}
-                        SELECT * FROM {staging_table}
-                    """)
-                conn.commit()
+                    if unique_columns:
+                        self._logger.info(f"Ensuring unique constraint on {target_table} before merging...")
+                        self._ensure_unique_constraint(target_table, unique_columns, cur)
+                        conn.commit()
 
-            self._logger.info(f"Merged data from {staging_table} to {target_table}")
+                        # Create indexes on staging table for better merge performance
+                        self._logger.info("Creating indexes on staging table...")
+                        columns_str = ", ".join(unique_columns)
+
+                        # Wrap each index creation in its own try-except block
+                        try:
+                            index_name = f"idx_{staging_table}_{'_'.join(unique_columns)}"
+                            cur.execute(f"""
+                                CREATE INDEX IF NOT EXISTS {index_name}
+                                ON {staging_table} ({columns_str})
+                            """)
+                            conn.commit()
+                        except Exception as e:
+                            self._logger.warning(f"Index creation failed: {e}")
+                            conn.rollback()
+
+                        # Start the merge operation
+                        self._logger.info("Starting merge operation...")
+
+                        try:
+                            # Use batch processing for better memory management
+                            batch_size = 1000000  # 1 million rows per batch
+                            offset = 0
+                            rows_processed = 0
+
+                            max_retries = 5  # Set a max number of retries
+                            retry_attempt = 0
+                            base_sleep_time = 2  # Initial sleep time for backoff
+
+                            while offset < total_rows:
+                                try:
+                                    # Process one batch
+                                    cur.execute(f"""
+                                        INSERT INTO {target_table}
+                                        SELECT DISTINCT ON ({columns_str}) *
+                                        FROM (
+                                            SELECT *
+                                            FROM {staging_table}
+                                            ORDER BY ctid
+                                            LIMIT {batch_size}
+                                            OFFSET {offset}
+                                        ) batch_data
+                                        ON CONFLICT ({columns_str}) DO NOTHING
+                                    """)
+
+                                    rows_processed += cur.rowcount
+                                    offset += batch_size
+
+                                    # Commit each batch
+                                    conn.commit()
+
+                                    # Log progress
+                                    progress = (offset / total_rows) * 100
+                                    self._logger.info(
+                                        f"Progress: {progress:.1f}% - Processed {rows_processed:,} rows"
+                                    )
+
+                                    # Reset retry counter on success
+                                    retry_attempt = 0
+
+                                except Exception as batch_error:
+                                    conn.rollback()
+                                    self._logger.error(f"Error processing batch at offset {offset}: {batch_error}")
+
+                                    retry_attempt += 1
+                                    if retry_attempt >= max_retries:
+                                        self._logger.error(f"Max retries ({max_retries}) reached at offset {offset}. Skipping batch.")
+                                        offset += batch_size  # Skip the batch and continue
+                                        continue
+
+                                    # Reduce batch size on error and retry with exponential backoff
+                                    batch_size = max(batch_size // 2, 10000)
+                                    sleep_time = base_sleep_time * (2 ** (retry_attempt - 1))  # Exponential backoff
+                                    self._logger.info(f"Reduced batch size to {batch_size:,} rows. Retrying in {sleep_time} seconds...")
+                                    time.sleep(sleep_time)
+
+                        except Exception as merge_error:
+                            self._logger.error(f"Error during merge operation: {merge_error}")
+                            conn.rollback()
+                            raise
+                    else:
+                        # Simple insert if no unique constraints
+                        try:
+                            self._logger.info("Performing simple insert (no deduplication)")
+                            cur.execute(f"""
+                                INSERT INTO {target_table}
+                                SELECT * FROM {staging_table}
+                            """)
+                            conn.commit()
+                        except Exception as insert_error:
+                            self._logger.error(f"Error during simple insert: {insert_error}")
+                            conn.rollback()
+                            raise
+
+                    self._logger.info(f"Merge completed: {staging_table} -> {target_table}")
+
+                except Exception as cur_error:
+                    self._logger.error(f"Cursor operation failed: {cur_error}")
+                    conn.rollback()
+                    raise
+
+        except Exception as e:
+            self._logger.error(f"Error during merge process: {e}")
+            if conn:
+                conn.rollback()
+            raise
+
         finally:
-            conn.close()
+            if conn:
+                try:
+                    conn.close()
+                except Exception as close_error:
+                    self._logger.error(f"Error closing connection: {close_error}")
 
     def _cleanup_staging(self, staging_table: str):
         """Drop the staging table."""
