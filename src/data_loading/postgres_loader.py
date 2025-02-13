@@ -297,8 +297,8 @@ class PostgresDataLoader(BaseDataLoader):
                     for column in existing_columns:
                         df[column] = func(df[column])  # Apply function to the full column
                     non_existing_columns = set(columns_list) - set(existing_columns)
-                    if non_existing_columns:
-                        print(f"The following columns do not exist in the DataFrame: {non_existing_columns}")
+                    # if non_existing_columns:
+                    #     print(f"The following columns do not exist in the DataFrame: {non_existing_columns}")
 
                     return df
 
