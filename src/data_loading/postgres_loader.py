@@ -272,28 +272,30 @@ class PostgresDataLoader(BaseDataLoader):
             self._logger.error(f"Failed to return connection to pool: {e}")
 
     def _create_staging_table(self, source_table: str, staging_table: str, unique_columns: Optional[List[str]] = None):
-        """Create a staging table and optimize it with indexes if unique columns are provided."""
+        """Create a staging table with optimized configuration for bulk loading."""
         conn = self._get_connection()
         try:
             with conn.cursor() as cur:
-                cur.execute(f"CREATE TABLE {staging_table} (LIKE {source_table})")
+                # Create unlogged table for faster inserts
+                cur.execute(f"CREATE UNLOGGED TABLE {staging_table} (LIKE {source_table})")
+
+                # Disable indexes during initial load
+                cur.execute(f"ALTER TABLE {staging_table} SET unlogged")
+
                 conn.commit()
                 self._logger.info(f"Created staging table: {staging_table}")
 
-                # If unique_columns is provided, create index and enforce unique constraint
+                # If unique_columns is provided, create index after data load
                 if unique_columns:
                     columns_str = ", ".join(unique_columns)
                     index_name = f"idx_{staging_table}_{'_'.join(unique_columns)}"
 
-                    self._logger.info(f"Creating index {index_name} on {staging_table} ({columns_str}) before loading data.")
-                    cur.execute(f"CREATE INDEX IF NOT EXISTS {index_name} ON {staging_table} ({columns_str});")
+                    self._logger.info(f"Creating index {index_name} on {staging_table} ({columns_str})")
+                    cur.execute(f"""
+                        CREATE INDEX CONCURRENTLY IF NOT EXISTS {index_name} 
+                        ON {staging_table} ({columns_str})
+                    """)
                     conn.commit()
-
-                    # Ensure the unique constraint
-                    self._logger.info(f"Ensuring unique constraint on {staging_table} for {columns_str}")
-                    self._ensure_unique_constraint(staging_table, unique_columns, cur)
-                else:
-                    self._logger.info(f"No unique columns provided. Skipping index and unique constraint creation.")
 
         finally:
             self._release_connection(conn)
