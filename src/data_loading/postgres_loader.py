@@ -449,7 +449,7 @@ class PostgresDataLoader(BaseDataLoader):
             target_table: str,
             unique_columns: Optional[List[str]] = None
     ):
-        """Merge data from staging to final table with deduplication and proper transaction handling."""
+        """Merge data from staging to final table with optimized deduplication and transaction handling."""
         conn = None
         try:
             conn = self._get_connection()
@@ -463,105 +463,53 @@ class PostgresDataLoader(BaseDataLoader):
                     self._logger.info(f"Starting merge of {total_rows:,} rows from {staging_table} to {target_table}")
 
                     if unique_columns:
-                        self._logger.info(f"Ensuring unique constraint on {target_table} before merging...")
-                        self._ensure_unique_constraint(target_table, unique_columns, cur)
-                        conn.commit()
-
-                        # Create indexes on staging table for better merge performance
-                        self._logger.info("Creating indexes on staging table...")
+                        self._logger.info(f"Starting optimized merge with unique constraints...")
                         columns_str = ", ".join(unique_columns)
 
-                        # Wrap each index creation in its own try-except block
+                        # Optimize the merge operation using a CTE and window functions
+                        merge_query = f"""
+                            WITH ranked_data AS (
+                                SELECT *,
+                                    ROW_NUMBER() OVER (
+                                        PARTITION BY {columns_str}
+                                        ORDER BY ctid DESC
+                                    ) as rn
+                                FROM {staging_table}
+                            )
+                            INSERT INTO {target_table}
+                            SELECT {', '.join(f'd.{col}' for col in self._get_table_columns(cur, staging_table))}
+                            FROM ranked_data d
+                            WHERE d.rn = 1
+                            ON CONFLICT ({columns_str}) DO NOTHING
+                        """
+
+                        # Set work_mem temporarily for this operation
+                        cur.execute("SHOW work_mem")
+                        original_work_mem = cur.fetchone()[0]
+
                         try:
-                            index_name = f"idx_{staging_table}_{'_'.join(unique_columns)}"
-                            cur.execute(f"""
-                                CREATE INDEX IF NOT EXISTS {index_name}
-                                ON {staging_table} ({columns_str})
-                            """)
+                            # Increase work_mem temporarily for better sort performance
+                            cur.execute("SET work_mem = '1GB'")
+
+                            # Execute the optimized merge
+                            cur.execute(merge_query)
+                            rows_affected = cur.rowcount
+
                             conn.commit()
-                        except Exception as e:
-                            self._logger.warning(f"Index creation failed: {e}")
-                            conn.rollback()
+                            self._logger.info(f"Merge completed: {rows_affected:,} rows affected")
 
-                        # Start the merge operation
-                        self._logger.info("Starting merge operation...")
+                        finally:
+                            # Restore original work_mem
+                            cur.execute(f"SET work_mem = '{original_work_mem}'")
 
-                        try:
-                            # Use batch processing for better memory management
-                            batch_size = 500000  # Adjust batch size as needed
-                            offset = 0
-                            rows_processed = 0
-
-                            max_retries = 5  # Set a max number of retries
-                            retry_attempt = 0
-                            base_sleep_time = 2  # Initial sleep time for backoff
-
-                            while offset < total_rows:
-                                try:
-                                    # Process one batch
-                                    cur.execute(f"""
-                                        INSERT INTO {target_table}
-                                        SELECT DISTINCT ON ({columns_str}) *
-                                        FROM (
-                                            SELECT *
-                                            FROM {staging_table}
-                                            ORDER BY ctid
-                                            LIMIT {batch_size}
-                                            OFFSET {offset}
-                                        ) batch_data
-                                        ON CONFLICT ({columns_str}) DO NOTHING
-                                    """)
-
-                                    rows_processed += cur.rowcount
-                                    offset += batch_size
-
-                                    # Commit each batch
-                                    conn.commit()
-
-                                    # Log progress
-                                    progress = (offset / total_rows) * 100
-                                    self._logger.info(
-                                        f"Progress: {progress:.1f}% - Processed {rows_processed:,} rows"
-                                    )
-
-                                    # Reset retry counter on success
-                                    retry_attempt = 0
-
-                                except Exception as batch_error:
-                                    conn.rollback()
-                                    self._logger.error(f"Error processing batch at offset {offset}: {batch_error}")
-
-                                    retry_attempt += 1
-                                    if retry_attempt >= max_retries:
-                                        self._logger.error(f"Max retries ({max_retries}) reached at offset {offset}. Skipping batch.")
-                                        offset += batch_size  # Skip the batch and continue
-                                        continue
-
-                                    # Reduce batch size on error and retry with exponential backoff
-                                    batch_size = max(batch_size // 2, 10000)
-                                    sleep_time = base_sleep_time * (2 ** (retry_attempt - 1))  # Exponential backoff
-                                    self._logger.info(f"Reduced batch size to {batch_size:,} rows. Retrying in {sleep_time} seconds...")
-                                    time.sleep(sleep_time)
-
-                        except Exception as merge_error:
-                            self._logger.error(f"Error during merge operation: {merge_error}")
-                            conn.rollback()
-                            raise
                     else:
                         # Simple insert if no unique constraints
-                        try:
-                            self._logger.info("Performing simple insert (no deduplication)")
-                            cur.execute(f"""
-                                INSERT INTO {target_table}
-                                SELECT * FROM {staging_table}
-                            """)
-                            conn.commit()
-                        except Exception as insert_error:
-                            self._logger.error(f"Error during simple insert: {insert_error}")
-                            conn.rollback()
-                            raise
-
-                    self._logger.info(f"Merge completed: {staging_table} -> {target_table}")
+                        self._logger.info("Performing simple insert (no deduplication)")
+                        cur.execute(f"""
+                            INSERT INTO {target_table}
+                            SELECT * FROM {staging_table}
+                        """)
+                        conn.commit()
 
                 except Exception as cur_error:
                     self._logger.error(f"Cursor operation failed: {cur_error}")
