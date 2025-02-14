@@ -526,6 +526,16 @@ class PostgresDataLoader(BaseDataLoader):
             if conn:
                 self._release_connection(conn)
 
+    def _get_table_columns(self, cur, table_name: str) -> List[str]:
+        """Get list of column names for a table."""
+        cur.execute(f"""
+            SELECT column_name 
+            FROM information_schema.columns 
+            WHERE table_name = '{table_name}'
+            ORDER BY ordinal_position
+        """)
+        return [row[0] for row in cur.fetchall()]
+
     def _cleanup_staging(self, staging_table: str):
         """Drop the staging table."""
         conn = self._get_connection()
