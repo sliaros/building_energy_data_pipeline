@@ -173,7 +173,7 @@ class PostgresDataLoader(BaseDataLoader):
 
         # Create staging table
         staging_table = f"{table_name}_staging_{int(time.time())}"
-        self._create_staging_table(table_name, staging_table)
+        self._create_staging_table(table_name, staging_table, unique_columns)
 
         try:
             if file_type=='parquet':
@@ -271,14 +271,30 @@ class PostgresDataLoader(BaseDataLoader):
         except Exception as e:
             self._logger.error(f"Failed to return connection to pool: {e}")
 
-    def _create_staging_table(self, source_table: str, staging_table: str):
-        """Create a staging table based on the source table schema."""
+    def _create_staging_table(self, source_table: str, staging_table: str, unique_columns: Optional[List[str]] = None):
+        """Create a staging table and optimize it with indexes if unique columns are provided."""
         conn = self._get_connection()
         try:
             with conn.cursor() as cur:
                 cur.execute(f"CREATE TABLE {staging_table} (LIKE {source_table})")
                 conn.commit()
-            self._logger.info(f"Created staging table {staging_table}")
+                self._logger.info(f"Created staging table: {staging_table}")
+
+                # If unique_columns is provided, create index and enforce unique constraint
+                if unique_columns:
+                    columns_str = ", ".join(unique_columns)
+                    index_name = f"idx_{staging_table}_{'_'.join(unique_columns)}"
+
+                    self._logger.info(f"Creating index {index_name} on {staging_table} ({columns_str}) before loading data.")
+                    cur.execute(f"CREATE INDEX IF NOT EXISTS {index_name} ON {staging_table} ({columns_str});")
+                    conn.commit()
+
+                    # Ensure the unique constraint
+                    self._logger.info(f"Ensuring unique constraint on {staging_table} for {columns_str}")
+                    self._ensure_unique_constraint(staging_table, unique_columns, cur)
+                else:
+                    self._logger.info(f"No unique columns provided. Skipping index and unique constraint creation.")
+
         finally:
             self._release_connection(conn)
 
@@ -357,6 +373,7 @@ class PostgresDataLoader(BaseDataLoader):
                 try:
                     with conn.cursor() as cur:
                         with open(temp_file, 'r') as f:
+                            cur.execute("SET synchronous_commit = OFF;")
                             cur.copy_expert(
                                 f"""
                                             COPY {staging_table} FROM STDIN WITH (
@@ -369,6 +386,7 @@ class PostgresDataLoader(BaseDataLoader):
                                             """,
                                 f
                             )
+                            cur.execute("SET synchronous_commit = ON;")
                         conn.commit()
                 finally:
                     self._release_connection(conn)
@@ -413,7 +431,7 @@ class PostgresDataLoader(BaseDataLoader):
                 WHERE conrelid = '{target_table}'::regclass
                 AND contype = 'u';
             """)
-            existing_constraints = [row[0] for row in cur.fetchall()]
+            existing_constraints = {row[0] for row in cur.fetchall()}
 
             if constraint_name not in existing_constraints:
                 self._logger.info(f"Creating unique constraint {constraint_name} on {target_table} ({columns_str})")
@@ -470,7 +488,7 @@ class PostgresDataLoader(BaseDataLoader):
 
                         try:
                             # Use batch processing for better memory management
-                            batch_size = 1000000  # 1 million rows per batch
+                            batch_size = 500000  # Adjust batch size as needed
                             offset = 0
                             rows_processed = 0
 
