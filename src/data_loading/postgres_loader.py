@@ -293,60 +293,173 @@ class PostgresDataLoader(BaseDataLoader):
         finally:
             self._release_connection(conn)
 
-    def _check_existing_data(self, file_path: Union[str, Path], target_table: str, sample_size: int = 100000) -> bool:
+    def _check_existing_data(self, file_path: Union[str, Path], target_table: str, sample_size: int = 50000) -> bool:
         """
-        Check if sample data exists in target table using an optimized approach.
+        An adaptive approach to detect duplicate data uploads that works with PostgresDataLoader.
+        Uses a combination of statistical analysis and selective sampling to efficiently detect duplicates.
 
-        This implementation uses:
-        1. Batch processing instead of row-by-row checks
-        2. Composite key hashing to reduce query complexity
-        3. Temporary table for efficient joining
-        4. EXISTS clause for early termination
+        The method operates in two phases:
+        1. Generate statistical fingerprints of the data based on column types and distributions
+        2. Perform smart sampling focusing on columns with high uniqueness
 
         Args:
             file_path: Path to the data file
             target_table: Name of the target table to check against
-            sample_size: Number of rows to sample for checking
+            sample_size: Maximum number of rows to check in detailed comparison
 
         Returns:
             bool: True if matching data exists, False otherwise
         """
-        # Sample the data
-        sampled_df = self._sampling_strategy.sample_data(file_path, sample_size)
+        # Get the table's column information using the existing method
+        table_columns = self._get_table_columns(target_table)
 
-        # Create a composite key for each row by concatenating all values
-        def create_composite_key(row):
-            # Convert all values to strings and handle NaN/None
-            values = []
-            for val in row:
-                if pd.isna(val):
-                    values.append('NULL')
-                else:
-                    values.append(str(val))
-            # Create a hash of the concatenated values
-            return hashlib.md5('|'.join(values).encode()).hexdigest()
+        if not table_columns:
+            raise ValueError(f"Could not retrieve column information for table {target_table}")
 
-        # Apply the composite key creation to all rows at once
-        sampled_df['composite_key'] = sampled_df.apply(create_composite_key, axis=1)
+        # Sample the new data file
+        df = self._sampling_strategy.sample_data(file_path, sample_size)
 
-        # Create temporary table query
-        temp_table = f"""
-        CREATE TEMPORARY TABLE temp_keys (
-            composite_key VARCHAR(32)
-        )
+        # Validate column compatibility
+        df_columns = set(df.columns)
+        if not df_columns.issubset(table_columns):
+            extra_columns = df_columns - set(table_columns)
+            raise ValueError(f"Input data contains columns not present in target table: {extra_columns}")
+
+        # Phase 1: Find selective columns using column statistics
+        selective_columns = self._find_selective_columns(df, target_table, table_columns)
+
+        if not selective_columns:
+            # If no selective columns found, fall back to using all columns
+            selective_columns = list(df_columns)
+
+        # Phase 2: Perform efficient duplicate detection
+        return self._check_duplicates(df, target_table, selective_columns)
+
+    def _find_selective_columns(self, df: pd.DataFrame, target_table: str,
+                                table_columns: List[str]) -> List[str]:
+        """
+        Identify columns that are most useful for duplicate detection by analyzing
+        PostgreSQL's system statistics and index information.
+
+        This method examines several PostgreSQL system catalogs:
+        - pg_stats: Contains statistical information about table contents
+        - pg_attribute: Stores information about table columns
+        - pg_class: Contains table and index information
+        - pg_index: Stores index metadata
+
+        The selection prioritizes:
+        1. Columns that are part of primary or unique indexes
+        2. Columns with high cardinality (many distinct values)
+        3. Columns with low null ratios
+
+        Args:
+            df: Input DataFrame containing the new data
+            target_table: Name of the target table to check against
+            table_columns: List of columns in the target table
+
+        Returns:
+            List[str]: Names of columns best suited for duplicate detection
+        """
+        # Query to analyze column statistics with explicit table references
+        stats_query = """
+            SELECT 
+                ps.attname as column_name,    -- Column name from pg_stats
+                ps.n_distinct,                -- Number of distinct values
+                ps.null_frac,                 -- Fraction of null values
+                CASE 
+                    WHEN idx.indisprimary THEN 1   -- Primary key
+                    WHEN idx.indisunique THEN 2    -- Unique index
+                    ELSE 3                         -- Regular column
+                END as key_priority
+            FROM pg_stats ps
+            -- Join with pg_attribute to get column metadata
+            JOIN pg_attribute pa 
+                ON (pa.attname = ps.attname 
+                    AND pa.attrelid = (
+                        SELECT oid 
+                        FROM pg_class 
+                        WHERE relname = %s
+                    ))
+            -- Join with pg_class to get table information
+            JOIN pg_class pc 
+                ON (pc.relname = ps.tablename 
+                    AND pc.relkind = 'r')
+            -- Left join with pg_index to identify indexed columns
+            LEFT JOIN pg_index idx 
+                ON (idx.indrelid = pc.oid 
+                    AND pa.attnum = ANY(idx.indkey))
+            WHERE ps.tablename = %s
+            AND ps.attname = ANY(%s)
+            AND ps.n_distinct > 0
+            ORDER BY 
+                key_priority,                 -- Prioritize indexed columns
+                ps.n_distinct DESC,           -- Then by unique values
+                ps.null_frac ASC             -- Then by fewest nulls
+            LIMIT 3
         """
 
-        # Create the composite key check query
-        check_query = f"""
+        # Get available columns that exist in both the DataFrame and target table
+        available_columns = [col for col in table_columns if col in df.columns]
+
+        conn = self._get_connection()
+        try:
+            with conn.cursor() as cur:
+                # Execute query with table name appearing twice:
+                # 1. For the pg_attribute join condition
+                # 2. For the pg_stats WHERE clause
+                cur.execute(stats_query, (target_table, target_table, available_columns))
+                results = cur.fetchall()
+
+                # Extract column names from results
+                selected_columns = [row[0] for row in results]
+
+                # If no columns were selected, fall back to all available columns
+                if not selected_columns:
+                    return available_columns
+
+                return selected_columns
+        finally:
+            self._release_connection(conn)
+
+    def _check_duplicates(self, df: pd.DataFrame, target_table: str,
+                          check_columns: List[str]) -> bool:
+        """
+        Check for duplicates using the most effective columns identified.
+        Uses batched queries and database indexes for efficiency.
+
+        The method creates a query that:
+        1. Uses indexed columns when available
+        2. Handles NULL values correctly
+        3. Uses EXISTS for early termination
+        4. Limits the result set for performance
+        """
+        # Sample a subset of rows for checking
+        sample_size = min(1000, len(df))
+        sampled_df = df[check_columns].sample(n=sample_size)
+
+        # Build an efficient query using the selected columns
+        conditions = []
+        params = []
+
+        # Generate comparison conditions for each sampled row
+        for _, row in sampled_df.iterrows():
+            row_conditions = []
+            for col in check_columns:
+                if pd.isna(row[col]):
+                    row_conditions.append(f"{col} IS NULL")
+                else:
+                    row_conditions.append(f"{col} = %s")
+                    params.append(row[col])
+            conditions.append(f"({' AND '.join(row_conditions)})")
+
+        if not conditions:
+            return False
+
+        # Use EXISTS for better performance
+        query = f"""
         SELECT EXISTS (
-            SELECT 1
-            FROM {target_table} t
-            JOIN temp_keys tk ON MD5(
-                CONCAT_WS('|', {
-        ', '.join(f'COALESCE(t.{col}::text, \'NULL\')'
-                  for col in sampled_df.columns if col!='composite_key')
-        })
-            ) = tk.composite_key
+            SELECT 1 FROM {target_table}
+            WHERE {' OR '.join(conditions)}
             LIMIT 1
         )
         """
@@ -354,62 +467,8 @@ class PostgresDataLoader(BaseDataLoader):
         conn = self._get_connection()
         try:
             with conn.cursor() as cur:
-                # Create temporary table
-                cur.execute(temp_table)
-
-                # Insert composite keys in batches
-                batch_size = 1000
-                for i in range(0, len(sampled_df), batch_size):
-                    batch = sampled_df.iloc[i:i + batch_size]
-                    values = [(key,) for key in batch['composite_key']]
-                    cur.executemany(
-                        "INSERT INTO temp_keys VALUES (%s)",
-                        values
-                    )
-
-                # Execute the existence check
-                cur.execute(check_query)
-                exists = cur.fetchone()[0]
-
-                return exists
-
-        finally:
-            # Clean up temporary table
-            with conn.cursor() as cur:
-                cur.execute("DROP TABLE IF EXISTS temp_keys")
-            self._release_connection(conn)
-
-    def _get_key_columns(self, table_name: str) -> List[str]:
-        """
-        Get the most selective columns from the table.
-        """
-        query = """
-            SELECT column_name
-            FROM (
-                SELECT 
-                    a.attname as column_name,
-                    n_distinct,
-                    CASE 
-                        WHEN i.indisprimary THEN 1
-                        WHEN i.indisunique THEN 2
-                        ELSE 3
-                    END as key_type
-                FROM pg_stats s
-                JOIN pg_attribute a ON (a.attname = s.attname)
-                JOIN pg_class c ON (c.relname = s.tablename AND c.relkind = 'r')
-                LEFT JOIN pg_index i ON (i.indrelid = c.oid AND a.attnum = ANY(i.indkey))
-                WHERE s.tablename = %s
-                AND n_distinct > 0
-            ) stats
-            ORDER BY key_type, n_distinct DESC
-            LIMIT 3
-        """
-
-        conn = self._get_connection()
-        try:
-            with conn.cursor() as cur:
-                cur.execute(query, (table_name,))
-                return [row[0] for row in cur.fetchall()]
+                cur.execute(query, params)
+                return cur.fetchone()[0]
         finally:
             self._release_connection(conn)
 
