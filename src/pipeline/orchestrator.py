@@ -110,6 +110,6 @@ class Orchestrator:
                 loader.load_data(
                     _file,
                     _table_name,
-                    chunk_size=200000,
+                    chunk_size=500000,
                     unique_columns=self._config['project_data']['unique_columns'][_table_name]
                 )

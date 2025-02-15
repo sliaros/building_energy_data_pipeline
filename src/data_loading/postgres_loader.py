@@ -155,7 +155,7 @@ class PostgresDataLoader(BaseDataLoader):
             self,
             file_path: Union[str, Path],
             table_name: str,
-            chunk_size: int = 100000,
+            chunk_size: int = 200000,
             unique_columns: List[str] = None
     ) -> Dict[str, Union[int, float]]|None:
         """

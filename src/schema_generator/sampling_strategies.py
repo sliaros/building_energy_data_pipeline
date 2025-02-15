@@ -15,7 +15,7 @@ class SamplingConfig:
     """Configuration for data sampling strategy"""
     max_rows: int = 100000  # Maximum number of rows to sample
     max_file_size: int = 1024 * 1024 * 100  # 100MB chunk size for reading
-    sampling_ratio: float = 0.01  # 1% sampling ratio for large files
+    sampling_ratio: float = 0.005  # 1% sampling ratio for large files
     random_seed: int = 42  # For reproducibility
 
 
