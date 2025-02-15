@@ -16,6 +16,7 @@ from .base_loader import BaseDataLoader
 import shutil
 import csv
 from src.schema_generator.sampling_strategies import BaseSamplingStrategy, RandomSamplingStrategy
+import hashlib
 
 class PostgresDataLoader(BaseDataLoader):
     """
@@ -292,44 +293,123 @@ class PostgresDataLoader(BaseDataLoader):
         finally:
             self._release_connection(conn)
 
-    def _check_existing_data(self, file_path: Union[str, Path], target_table: str, sample_size: int = 100000) -> bool|None:
+    def _check_existing_data(self, file_path: Union[str, Path], target_table: str, sample_size: int = 100000) -> bool:
         """
-        Check if sample data exists in target table
+        Check if sample data exists in target table using an optimized approach.
+
+        This implementation uses:
+        1. Batch processing instead of row-by-row checks
+        2. Composite key hashing to reduce query complexity
+        3. Temporary table for efficient joining
+        4. EXISTS clause for early termination
+
+        Args:
+            file_path: Path to the data file
+            target_table: Name of the target table to check against
+            sample_size: Number of rows to sample for checking
+
+        Returns:
+            bool: True if matching data exists, False otherwise
         """
+        # Sample the data
         sampled_df = self._sampling_strategy.sample_data(file_path, sample_size)
 
-        # Get column names
-        columns = sampled_df.columns.tolist()
-
-        # Build query to check for existing data
-        query_conditions = []
-        for _, row in sampled_df.iterrows():
-            condition_parts = []
-            for col in columns:
-                if pd.isna(row[col]):
-                    condition_parts.append(f"{col} IS NULL")
+        # Create a composite key for each row by concatenating all values
+        def create_composite_key(row):
+            # Convert all values to strings and handle NaN/None
+            values = []
+            for val in row:
+                if pd.isna(val):
+                    values.append('NULL')
                 else:
-                    condition_parts.append(f"{col} = %s")
-            query_conditions.append(f"({' AND '.join(condition_parts)})")
+                    values.append(str(val))
+            # Create a hash of the concatenated values
+            return hashlib.md5('|'.join(values).encode()).hexdigest()
 
-        query = f"""
-            SELECT COUNT(*) 
-            FROM {target_table} 
-            WHERE {' OR '.join(query_conditions)}
+        # Apply the composite key creation to all rows at once
+        sampled_df['composite_key'] = sampled_df.apply(create_composite_key, axis=1)
+
+        # Create temporary table query
+        temp_table = f"""
+        CREATE TEMPORARY TABLE temp_keys (
+            composite_key VARCHAR(32)
+        )
         """
 
-        # Flatten values for query parameters
-        params = []
-        for _, row in sampled_df.iterrows():
-            for col in columns:
-                if not pd.isna(row[col]):
-                    params.append(row[col])
+        # Create the composite key check query
+        check_query = f"""
+        SELECT EXISTS (
+            SELECT 1
+            FROM {target_table} t
+            JOIN temp_keys tk ON MD5(
+                CONCAT_WS('|', {
+        ', '.join(f'COALESCE(t.{col}::text, \'NULL\')'
+                  for col in sampled_df.columns if col!='composite_key')
+        })
+            ) = tk.composite_key
+            LIMIT 1
+        )
+        """
+
         conn = self._get_connection()
         try:
             with conn.cursor() as cur:
-                cur.execute(query, params)
-                count = cur.fetchone()[0]
-                return count > 0
+                # Create temporary table
+                cur.execute(temp_table)
+
+                # Insert composite keys in batches
+                batch_size = 1000
+                for i in range(0, len(sampled_df), batch_size):
+                    batch = sampled_df.iloc[i:i + batch_size]
+                    values = [(key,) for key in batch['composite_key']]
+                    cur.executemany(
+                        "INSERT INTO temp_keys VALUES (%s)",
+                        values
+                    )
+
+                # Execute the existence check
+                cur.execute(check_query)
+                exists = cur.fetchone()[0]
+
+                return exists
+
+        finally:
+            # Clean up temporary table
+            with conn.cursor() as cur:
+                cur.execute("DROP TABLE IF EXISTS temp_keys")
+            self._release_connection(conn)
+
+    def _get_key_columns(self, table_name: str) -> List[str]:
+        """
+        Get the most selective columns from the table.
+        """
+        query = """
+            SELECT column_name
+            FROM (
+                SELECT 
+                    a.attname as column_name,
+                    n_distinct,
+                    CASE 
+                        WHEN i.indisprimary THEN 1
+                        WHEN i.indisunique THEN 2
+                        ELSE 3
+                    END as key_type
+                FROM pg_stats s
+                JOIN pg_attribute a ON (a.attname = s.attname)
+                JOIN pg_class c ON (c.relname = s.tablename AND c.relkind = 'r')
+                LEFT JOIN pg_index i ON (i.indrelid = c.oid AND a.attnum = ANY(i.indkey))
+                WHERE s.tablename = %s
+                AND n_distinct > 0
+            ) stats
+            ORDER BY key_type, n_distinct DESC
+            LIMIT 3
+        """
+
+        conn = self._get_connection()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(query, (table_name,))
+                return [row[0] for row in cur.fetchall()]
         finally:
             self._release_connection(conn)
 
