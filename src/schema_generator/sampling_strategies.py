@@ -47,9 +47,9 @@ class RandomSamplingStrategy(BaseSamplingStrategy):
     def sample_data(self, data_source: Union[str, Path], sample_size: int) -> pd.DataFrame:
         path = self._handle_file_input(data_source)
 
-        if path.suffix=='.parquet':
+        if path.suffix == '.parquet':
             return self._sample_parquet(path, sample_size)
-        elif path.suffix=='.csv':
+        elif path.suffix == '.csv':
             return self._sample_csv(path, sample_size)
         else:
             raise ValueError(f"Unsupported file type: {path.suffix}")
@@ -68,18 +68,15 @@ class RandomSamplingStrategy(BaseSamplingStrategy):
             int(total_rows * self.config.sampling_ratio)
         )
 
-        # Ensure we include the first and last rows
-        required_indices = {0, total_rows - 1}  # First and last row indices
-        remaining_sample_size = final_sample_size - len(required_indices)
+        # Ensure we have room for the first and last rows
+        if final_sample_size < 2:
+            final_sample_size = 2
 
-        # Generate random row indices for the remaining sample
-        remaining_indices = set(random.sample(
-            range(1, total_rows - 1),  # Exclude first and last rows
-            remaining_sample_size
-        ))
+        # Generate random row indices, excluding the first and last rows
+        indices = sorted(random.sample(range(1, total_rows - 1), final_sample_size - 2))
 
-        # Combine required and random indices
-        indices = sorted(required_indices.union(remaining_indices))
+        # Add the first and last row indices
+        indices = [0] + indices + [total_rows - 1]
 
         # Read only the selected rows
         scanner = dataset.scanner(
@@ -96,14 +93,15 @@ class RandomSamplingStrategy(BaseSamplingStrategy):
             if len(df) <= sample_size:
                 return df
 
-            # Ensure we include the first and last rows
-            first_row = df.iloc[[0]]
-            last_row = df.iloc[[-1]]
-            remaining_sample = df.iloc[1:-1].sample(
-                n=sample_size - 2,
-                random_state=self.config.random_seed
-            )
-            return pd.concat([first_row, remaining_sample, last_row])
+            # Ensure we have room for the first and last rows
+            if sample_size < 2:
+                sample_size = 2
+
+            # Sample the data, excluding the first and last rows
+            sampled_df = df.iloc[1:-1].sample(n=sample_size - 2, random_state=self.config.random_seed)
+
+            # Add the first and last rows
+            return pd.concat([df.iloc[[0]], sampled_df, df.iloc[[-1]]])
 
         # For large files, estimate total rows first
         with open(file_path, 'rb') as f:
@@ -117,19 +115,20 @@ class RandomSamplingStrategy(BaseSamplingStrategy):
             int(estimated_total_rows * self.config.sampling_ratio)
         )
 
-        # Ensure we include the first and last rows
-        required_rows = {0, estimated_total_rows - 1}  # First and last row indices
-        remaining_sample_size = final_sample_size - len(required_rows)
+        # Ensure we have room for the first and last rows
+        if final_sample_size < 2:
+            final_sample_size = 2
 
-        # Skip random rows for efficiency
-        skip_rows = set(random.sample(
-            range(1, estimated_total_rows - 1),  # Exclude first and last rows
-            estimated_total_rows - 2 - remaining_sample_size
+        # Skip random rows for efficiency, excluding the first and last rows
+        skip_rows = sorted(random.sample(
+            range(1, estimated_total_rows - 1),
+            estimated_total_rows - final_sample_size
         ))
 
-        # Read the required and sampled rows
-        rows_to_read = sorted(set(range(estimated_total_rows)) - skip_rows)
-        return pd.read_csv(file_path, skiprows=lambda x: x not in rows_to_read)
+        # Add the first and last rows
+        skip_rows = [row for row in skip_rows if row != 0 and row != estimated_total_rows - 1]
+
+        return pd.read_csv(file_path, skiprows=skip_rows)
 
 
 class SystematicSamplingStrategy(BaseSamplingStrategy):

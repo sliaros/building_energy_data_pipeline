@@ -30,7 +30,7 @@ class PostgresDataLoader(BaseDataLoader):
                 max_retries: int = 3,
                 retry_delay: float = 1.0,
                 db_type: str = "staging",
-                db_params: Optional[Dict] = None
+                db_params: Optional[Dict] = None,
         ):
             self._config = config
             self._logger = logger
@@ -106,7 +106,7 @@ class PostgresDataLoader(BaseDataLoader):
                 return self._create_database()
             raise
 
-    def _create_database(self) -> bool:
+    def _create_database(self) -> bool|None:
         """
         Create a new database if it doesn't exist.
 
@@ -152,7 +152,7 @@ class PostgresDataLoader(BaseDataLoader):
             table_name: str,
             chunk_size: int = 100000,
             unique_columns: List[str] = None
-    ) -> Dict[str, Union[int, float]]:
+    ) -> Dict[str, Union[int, float]]|None:
         """
         Load data efficiently using COPY command and staging tables.
 
@@ -173,12 +173,18 @@ class PostgresDataLoader(BaseDataLoader):
 
         # Create staging table
         staging_table = f"{table_name}_staging_{int(time.time())}"
-        self._create_staging_table(table_name, staging_table, unique_columns)
+        self._create_staging_table(table_name, staging_table)
+
+        df = reader_func(file_path)
+        if self._check_existing_data(df, table_name):
+            raise ValueError(f"Data already exists in {table_name}")
 
         try:
             if file_type=='parquet':
                 # For Parquet, read the file to get total rows
                 df = reader_func(file_path)
+                if self._check_existing_data(df, table_name):
+                    raise ValueError(f"Data already exists in {table_name}")
                 total_rows = len(df)
                 total_chunks = math.ceil(total_rows / chunk_size)
 
@@ -241,7 +247,7 @@ class PostgresDataLoader(BaseDataLoader):
                             self._handle_chunk_error(chunk_info, e, chunk_statuses)
 
             # After all chunks are processed, merge data to final table
-            self._merge_staging_to_final(staging_table, table_name, unique_columns)
+            self._merge_staging_to_final(staging_table, table_name)
 
         finally:
             # Cleanup
@@ -271,39 +277,60 @@ class PostgresDataLoader(BaseDataLoader):
         except Exception as e:
             self._logger.error(f"Failed to return connection to pool: {e}")
 
-    def _create_staging_table(self, source_table: str, staging_table: str, unique_columns: Optional[List[str]] = None):
-        """Create a staging table and optimize it with indexes if unique columns are provided."""
+    def _create_staging_table(self, source_table: str, staging_table: str):
+        """Create a staging table without indexes."""
         conn = self._get_connection()
         try:
             with conn.cursor() as cur:
-                # Create unlogged table for faster inserts
                 cur.execute(f"CREATE UNLOGGED TABLE {staging_table} (LIKE {source_table})")
-
-                # Disable indexes during initial load
                 cur.execute(f"ALTER TABLE {staging_table} SET unlogged")
-
                 conn.commit()
                 self._logger.info(f"Created staging table: {staging_table}")
+        finally:
+            self._release_connection(conn)
 
-                # If unique_columns is provided, create index and enforce unique constraint
-                if unique_columns:
-                    columns_str = ", ".join(unique_columns)
-                    index_name = f"idx_{staging_table}_{'_'.join(unique_columns)}"
+    def _check_existing_data(self, df: pd.DataFrame, target_table: str) -> bool|None:
+        """
+        Check if sample data exists in target table
+        """
+        # Sample 1% of data
+        sample_size = max(int(len(df) * 0.01), 2)  # At least 2 rows (first and last)
 
-                    conn.autocommit = True
-                    self._logger.info(f"Creating index {index_name} on {staging_table} ({columns_str}) before loading data.")
-                    cur.execute(f"""
-                                        CREATE INDEX CONCURRENTLY IF NOT EXISTS {index_name} 
-                                        ON {staging_table} ({columns_str})
-                                    """)
-                    conn.autocommit = False
+        sampled_df = self._sampling_strategy.sample_data(df, sample_size)
 
-                    # Ensure the unique constraint
-                    self._logger.info(f"Ensuring unique constraint on {staging_table} for {columns_str}")
-                    self._ensure_unique_constraint(staging_table, unique_columns, cur)
+        # Get column names
+        columns = df.columns.tolist()
+
+        # Build query to check for existing data
+        query_conditions = []
+        for _, row in sampled_df.iterrows():
+            condition_parts = []
+            for col in columns:
+                if pd.isna(row[col]):
+                    condition_parts.append(f"{col} IS NULL")
                 else:
-                    self._logger.info(f"No unique columns provided. Skipping index and unique constraint creation.")
+                    condition_parts.append(f"{col} = %s")
+            query_conditions.append(f"({' AND '.join(condition_parts)})")
 
+        query = f"""
+            SELECT COUNT(*) 
+            FROM {target_table} 
+            WHERE {' OR '.join(query_conditions)}
+        """
+
+        # Flatten values for query parameters
+        params = []
+        for _, row in sampled_df.iterrows():
+            for col in columns:
+                if not pd.isna(row[col]):
+                    params.append(row[col])
+
+        conn = self._get_connection()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(query, params)
+                count = cur.fetchone()[0]
+                return count > 0
         finally:
             self._release_connection(conn)
 
@@ -312,45 +339,46 @@ class PostgresDataLoader(BaseDataLoader):
             df: pd.DataFrame,
             staging_table: str,
             chunk_index: int
-    ) -> Dict[str, float]:
+    ) -> Dict[str, float]|None:
         """Process a single chunk with retries using COPY command."""
+
+        # Convert numeric columns with proper integer handling
+        def convert_to_numeric_int64(column: pd.Series) -> pd.Series:
+            # First convert to numeric, coercing errors to NaN
+            numeric_series = pd.to_numeric(column, errors="coerce")
+            # For integer columns, round and convert to integers
+            numeric_series = numeric_series.round().astype('Int64', errors='ignore')
+            # Convert NaN to None (which will become NULL in the database)
+            return numeric_series.where(numeric_series.notna(), None)
+
+        def apply_to_columns(df: pd.DataFrame, columns_list: list, func) -> pd.DataFrame:
+            """
+            Applies a custom function to specified columns in a DataFrame if they exist.
+
+            Parameters:
+                df (pd.DataFrame): The input DataFrame.
+                columns_list (list): List of columns to check and apply the function to.
+                func (function): The custom function to apply to the columns.
+
+            Returns:
+                pd.DataFrame: The modified DataFrame.
+            """
+            existing_columns = [col for col in columns_list if col in df.columns]
+
+            # Apply function to the entire column (not element-wise)
+            for column in existing_columns:
+                df[column] = func(df[column])  # Apply function to the full column
+            non_existing_columns = set(columns_list) - set(existing_columns)
+            # if non_existing_columns:
+            #     print(f"The following columns do not exist in the DataFrame: {non_existing_columns}")
+
+            return df
+
         temp_file = os.path.join(self._temp_dir, f"chunk_{chunk_index}.csv")
 
         for attempt in range(self._max_retries):
             try:
                 start_time = time.time()
-
-                # Convert numeric columns with proper integer handling
-                def convert_to_numeric_int64(column: pd.Series) -> pd.Series:
-                    # First convert to numeric, coercing errors to NaN
-                    numeric_series = pd.to_numeric(column, errors="coerce")
-                    # For integer columns, round and convert to integers
-                    numeric_series = numeric_series.round().astype('Int64', errors='ignore')
-                    # Convert NaN to None (which will become NULL in the database)
-                    return numeric_series.where(numeric_series.notna(), None)
-
-                def apply_to_columns(df: pd.DataFrame, columns_list: list, func) -> pd.DataFrame:
-                    """
-                    Applies a custom function to specified columns in a DataFrame if they exist.
-
-                    Parameters:
-                        df (pd.DataFrame): The input DataFrame.
-                        columns_list (list): List of columns to check and apply the function to.
-                        func (function): The custom function to apply to the columns.
-
-                    Returns:
-                        pd.DataFrame: The modified DataFrame.
-                    """
-                    existing_columns = [col for col in columns_list if col in df.columns]
-
-                    # Apply function to the entire column (not element-wise)
-                    for column in existing_columns:
-                        df[column] = func(df[column])  # Apply function to the full column
-                    non_existing_columns = set(columns_list) - set(existing_columns)
-                    # if non_existing_columns:
-                    #     print(f"The following columns do not exist in the DataFrame: {non_existing_columns}")
-
-                    return df
 
                 # Integer columns that need special handling
                 integer_columns = ['site_id_kaggle', 'building_id_kaggle','sqft',
@@ -452,73 +480,26 @@ class PostgresDataLoader(BaseDataLoader):
             self._logger.error(f"Failed to create unique constraint: {e}")
             raise
 
-    def _merge_staging_to_final(
-            self,
-            staging_table: str,
-            target_table: str,
-            unique_columns: Optional[List[str]] = None
-    ):
-        """Merge data from staging to final table with optimized deduplication and transaction handling."""
+    def _merge_staging_to_final(self, staging_table: str, target_table: str):
+        """Merge data from staging to final table without deduplication."""
         conn = None
         try:
             conn = self._get_connection()
-            conn.autocommit = False  # Ensure we're in transaction mode
+            conn.autocommit = False
 
             with conn.cursor() as cur:
                 try:
-                    # Get total number of rows in staging
                     cur.execute(f"SELECT COUNT(*) FROM {staging_table}")
                     total_rows = cur.fetchone()[0]
                     self._logger.info(f"Starting merge of {total_rows:,} rows from {staging_table} to {target_table}")
 
-                    if unique_columns:
-                        self._logger.info(f"Starting optimized merge with unique constraints...")
-                        columns_str = ", ".join(unique_columns)
-
-                        # Optimize the merge operation using a CTE and window functions
-                        merge_query = f"""
-                            WITH ranked_data AS (
-                                SELECT *,
-                                    ROW_NUMBER() OVER (
-                                        PARTITION BY {columns_str}
-                                        ORDER BY ctid DESC
-                                    ) as rn
-                                FROM {staging_table}
-                            )
-                            INSERT INTO {target_table}
-                            SELECT {', '.join(f'd.{col}' for col in self._get_table_columns(cur, staging_table))}
-                            FROM ranked_data d
-                            WHERE d.rn = 1
-                            ON CONFLICT ({columns_str}) DO NOTHING
-                        """
-
-                        # Set work_mem temporarily for this operation
-                        cur.execute("SHOW work_mem")
-                        original_work_mem = cur.fetchone()[0]
-
-                        try:
-                            # Increase work_mem temporarily for better sort performance
-                            cur.execute("SET work_mem = '1GB'")
-
-                            # Execute the optimized merge
-                            cur.execute(merge_query)
-                            rows_affected = cur.rowcount
-
-                            conn.commit()
-                            self._logger.info(f"Merge completed: {rows_affected:,} rows affected")
-
-                        finally:
-                            # Restore original work_mem
-                            cur.execute(f"SET work_mem = '{original_work_mem}'")
-
-                    else:
-                        # Simple insert if no unique constraints
-                        self._logger.info("Performing simple insert (no deduplication)")
-                        cur.execute(f"""
-                            INSERT INTO {target_table}
-                            SELECT * FROM {staging_table}
-                        """)
-                        conn.commit()
+                    # Simple insert without deduplication
+                    cur.execute(f"""
+                        INSERT INTO {target_table}
+                        SELECT * FROM {staging_table}
+                    """)
+                    conn.commit()
+                    self._logger.info(f"Merged {cur.rowcount:,} rows into {target_table}")
 
                 except Exception as cur_error:
                     self._logger.error(f"Cursor operation failed: {cur_error}")
