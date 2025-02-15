@@ -15,6 +15,7 @@ from pathlib import Path
 from .base_loader import BaseDataLoader
 import shutil
 import csv
+from src.schema_generator.sampling_strategies import BaseSamplingStrategy, RandomSamplingStrategy
 
 class PostgresDataLoader(BaseDataLoader):
     """
@@ -31,6 +32,7 @@ class PostgresDataLoader(BaseDataLoader):
                 retry_delay: float = 1.0,
                 db_type: str = "staging",
                 db_params: Optional[Dict] = None,
+                sampling_strategy: Optional[BaseSamplingStrategy] = None
         ):
             self._config = config
             self._logger = logger
@@ -59,6 +61,8 @@ class PostgresDataLoader(BaseDataLoader):
             # Create temp directory for chunk files
             self._temp_dir = tempfile.mkdtemp()
             self._logger.info(f"Created temporary directory at {self._temp_dir}")
+
+            self._sampling_strategy = sampling_strategy or RandomSamplingStrategy()
 
     def __del__(self):
             """Cleanup temporary directory on object destruction"""
@@ -175,16 +179,14 @@ class PostgresDataLoader(BaseDataLoader):
         staging_table = f"{table_name}_staging_{int(time.time())}"
         self._create_staging_table(table_name, staging_table)
 
-        df = reader_func(file_path)
-        if self._check_existing_data(df, table_name):
-            raise ValueError(f"Data already exists in {table_name}")
+        if self._check_existing_data(file_path, table_name):
+            self._logger.info(f"Data already exists in {table_name}")
+            return
 
         try:
             if file_type=='parquet':
                 # For Parquet, read the file to get total rows
                 df = reader_func(file_path)
-                if self._check_existing_data(df, table_name):
-                    raise ValueError(f"Data already exists in {table_name}")
                 total_rows = len(df)
                 total_chunks = math.ceil(total_rows / chunk_size)
 
@@ -289,17 +291,15 @@ class PostgresDataLoader(BaseDataLoader):
         finally:
             self._release_connection(conn)
 
-    def _check_existing_data(self, df: pd.DataFrame, target_table: str) -> bool|None:
+    def _check_existing_data(self, file_path: Union[str, Path], target_table: str, sample_size: int = 100000) -> bool|None:
         """
         Check if sample data exists in target table
         """
-        # Sample 1% of data
-        sample_size = max(int(len(df) * 0.01), 2)  # At least 2 rows (first and last)
 
-        sampled_df = self._sampling_strategy.sample_data(df, sample_size)
+        sampled_df = self._sampling_strategy.sample_data(file_path, sample_size)
 
         # Get column names
-        columns = df.columns.tolist()
+        columns = sampled_df.columns.tolist()
 
         # Build query to check for existing data
         query_conditions = []
@@ -324,7 +324,6 @@ class PostgresDataLoader(BaseDataLoader):
             for col in columns:
                 if not pd.isna(row[col]):
                     params.append(row[col])
-
         conn = self._get_connection()
         try:
             with conn.cursor() as cur:

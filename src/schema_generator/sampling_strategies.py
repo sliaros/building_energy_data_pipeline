@@ -67,6 +67,7 @@ class RandomSamplingStrategy(BaseSamplingStrategy):
             self.config.max_rows,
             int(total_rows * self.config.sampling_ratio)
         )
+        print(final_sample_size)
 
         # Ensure we have room for the first and last rows
         if final_sample_size < 2:
