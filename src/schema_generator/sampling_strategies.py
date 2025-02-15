@@ -7,6 +7,7 @@ import pandas as pd
 import numpy as np
 import pyarrow as pa
 import pyarrow.dataset as ds
+import pyarrow.parquet as pq
 
 
 @dataclass
@@ -56,35 +57,55 @@ class RandomSamplingStrategy(BaseSamplingStrategy):
 
     def _sample_parquet(self, file_path: Path, sample_size: int) -> pd.DataFrame:
         dataset = ds.dataset(file_path, format='parquet')
-        total_rows = sum(1 for _ in dataset.scanner().to_batches())
+
+        # Get total row count from metadata
+        total_rows = sum(fragment.metadata.num_rows for fragment in dataset.get_fragments())
 
         if total_rows <= sample_size:
             return dataset.to_table().to_pandas()
 
-        # Calculate actual sample size based on config
+        # Calculate actual sample size
         final_sample_size = min(
             sample_size,
             self.config.max_rows,
             int(total_rows * self.config.sampling_ratio)
         )
-        print(final_sample_size)
 
-        # Ensure we have room for the first and last rows
+        # Ensure at least 2 rows (first and last)
         if final_sample_size < 2:
             final_sample_size = 2
 
-        # Generate random row indices, excluding the first and last rows
+        # Generate random row indices, including first and last
         indices = sorted(random.sample(range(1, total_rows - 1), final_sample_size - 2))
-
-        # Add the first and last row indices
         indices = [0] + indices + [total_rows - 1]
 
-        # Read only the selected rows
-        scanner = dataset.scanner(
-            columns=dataset.schema.names,
-            filter=ds.field('__index_level_0').isin(indices)
-        )
-        return scanner.to_table().to_pandas()
+        # Stream through the dataset and collect only needed rows
+        selected_rows = []
+        current_row = 0
+
+        global_row = 0  # Track absolute row position
+        selected_rows = []  # Store selected rows
+
+        for batch in dataset.scanner().to_batches():
+            batch_size = batch.num_rows
+            batch_df = batch.to_pandas()  # Convert batch to Pandas DataFrame
+
+            # Compute global row index range for this batch
+            batch_start = global_row
+            batch_end = global_row + batch_size - 1
+
+            # Find which indices belong to this batch
+            batch_indices = [idx for idx in indices if batch_start <= idx <= batch_end]
+            if batch_indices:
+                relative_indices = [idx - batch_start for idx in batch_indices]  # Adjust for batch indexing
+                selected_rows.append(batch_df.iloc[relative_indices])
+
+            global_row += batch_size  # Update global row counter
+
+        # Concatenate all selected rows into a single DataFrame
+        sampled_df = pd.concat(selected_rows, ignore_index=True)
+
+        return sampled_df
 
     def _sample_csv(self, file_path: Path, sample_size: int) -> pd.DataFrame:
         file_size = file_path.stat().st_size

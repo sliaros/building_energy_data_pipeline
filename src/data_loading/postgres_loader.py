@@ -179,6 +179,7 @@ class PostgresDataLoader(BaseDataLoader):
         staging_table = f"{table_name}_staging_{int(time.time())}"
         self._create_staging_table(table_name, staging_table)
 
+        self._logger.info(f"Checking for duplicated or overlapping data")
         if self._check_existing_data(file_path, table_name):
             self._logger.info(f"Data already exists in {table_name}")
             return
@@ -295,7 +296,6 @@ class PostgresDataLoader(BaseDataLoader):
         """
         Check if sample data exists in target table
         """
-
         sampled_df = self._sampling_strategy.sample_data(file_path, sample_size)
 
         # Get column names
@@ -479,8 +479,8 @@ class PostgresDataLoader(BaseDataLoader):
             self._logger.error(f"Failed to create unique constraint: {e}")
             raise
 
-    def _merge_staging_to_final(self, staging_table: str, target_table: str):
-        """Merge data from staging to final table without deduplication."""
+    def _merge_staging_to_final(self, staging_table: str, target_table: str, batch_size: int = 10000):
+        """Merge data from staging to final table efficiently using batch inserts and a progress bar."""
         conn = None
         try:
             conn = self._get_connection()
@@ -488,17 +488,31 @@ class PostgresDataLoader(BaseDataLoader):
 
             with conn.cursor() as cur:
                 try:
+                    # Count total rows for progress tracking
                     cur.execute(f"SELECT COUNT(*) FROM {staging_table}")
                     total_rows = cur.fetchone()[0]
+
                     self._logger.info(f"Starting merge of {total_rows:,} rows from {staging_table} to {target_table}")
 
-                    # Simple insert without deduplication
-                    cur.execute(f"""
-                        INSERT INTO {target_table}
-                        SELECT * FROM {staging_table}
-                    """)
-                    conn.commit()
-                    self._logger.info(f"Merged {cur.rowcount:,} rows into {target_table}")
+                    if total_rows==0:
+                        self._logger.info("No rows to merge. Skipping process.")
+                        return
+
+                    # Process data in batches for efficiency
+                    offset = 0
+                    with tqdm(total=total_rows, desc="Merging Rows", unit="rows") as pbar:
+                        while offset < total_rows:
+                            cur.execute(f"""
+                                INSERT INTO {target_table}
+                                SELECT * FROM {staging_table}
+                                LIMIT {batch_size} OFFSET {offset}
+                            """)
+                            inserted_rows = cur.rowcount
+                            conn.commit()
+                            offset += inserted_rows
+                            pbar.update(inserted_rows)
+
+                    self._logger.info(f"Successfully merged {offset:,} rows into {target_table}")
 
                 except Exception as cur_error:
                     self._logger.error(f"Cursor operation failed: {cur_error}")
