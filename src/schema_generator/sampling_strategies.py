@@ -68,8 +68,18 @@ class RandomSamplingStrategy(BaseSamplingStrategy):
             int(total_rows * self.config.sampling_ratio)
         )
 
-        # Generate random row indices
-        indices = sorted(random.sample(range(total_rows), final_sample_size))
+        # Ensure we include the first and last rows
+        required_indices = {0, total_rows - 1}  # First and last row indices
+        remaining_sample_size = final_sample_size - len(required_indices)
+
+        # Generate random row indices for the remaining sample
+        remaining_indices = set(random.sample(
+            range(1, total_rows - 1),  # Exclude first and last rows
+            remaining_sample_size
+        ))
+
+        # Combine required and random indices
+        indices = sorted(required_indices.union(remaining_indices))
 
         # Read only the selected rows
         scanner = dataset.scanner(
@@ -85,7 +95,15 @@ class RandomSamplingStrategy(BaseSamplingStrategy):
             df = pd.read_csv(file_path)
             if len(df) <= sample_size:
                 return df
-            return df.sample(n=sample_size, random_state=self.config.random_seed)
+
+            # Ensure we include the first and last rows
+            first_row = df.iloc[[0]]
+            last_row = df.iloc[[-1]]
+            remaining_sample = df.iloc[1:-1].sample(
+                n=sample_size - 2,
+                random_state=self.config.random_seed
+            )
+            return pd.concat([first_row, remaining_sample, last_row])
 
         # For large files, estimate total rows first
         with open(file_path, 'rb') as f:
@@ -99,12 +117,19 @@ class RandomSamplingStrategy(BaseSamplingStrategy):
             int(estimated_total_rows * self.config.sampling_ratio)
         )
 
+        # Ensure we include the first and last rows
+        required_rows = {0, estimated_total_rows - 1}  # First and last row indices
+        remaining_sample_size = final_sample_size - len(required_rows)
+
         # Skip random rows for efficiency
-        skip_rows = sorted(random.sample(
-            range(1, estimated_total_rows),
-            estimated_total_rows - final_sample_size
+        skip_rows = set(random.sample(
+            range(1, estimated_total_rows - 1),  # Exclude first and last rows
+            estimated_total_rows - 2 - remaining_sample_size
         ))
-        return pd.read_csv(file_path, skiprows=skip_rows)
+
+        # Read the required and sampled rows
+        rows_to_read = sorted(set(range(estimated_total_rows)) - skip_rows)
+        return pd.read_csv(file_path, skiprows=lambda x: x not in rows_to_read)
 
 
 class SystematicSamplingStrategy(BaseSamplingStrategy):
