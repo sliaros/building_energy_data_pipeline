@@ -559,7 +559,7 @@ class PostgresDataLoader(BaseDataLoader):
             self._logger.error(f"Failed to create unique constraint: {e}")
             raise
 
-    def _merge_staging_to_final(self, staging_table: str, target_table: str, batch_size: int = 10000):
+    def _merge_staging_to_final(self, staging_table: str, target_table: str, batch_size: int = 1000000):
         """Merge data from staging to final table efficiently using batch inserts and a progress bar."""
         conn = None
         try:
