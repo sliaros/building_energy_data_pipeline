@@ -10,13 +10,16 @@ import pandas as pd
 from tqdm import tqdm
 import tempfile
 import os
-from typing import Optional, Dict, Union, List, Tuple
+from typing import Optional, Dict, Union, List, Tuple, Any
 from pathlib import Path
 from .base_loader import BaseDataLoader
 import shutil
 import csv
 from src.schema_generator.sampling_strategies import BaseSamplingStrategy, RandomSamplingStrategy
-import hashlib
+import pyarrow.parquet as pq
+import pyarrow as pa
+import json
+import re
 
 class PostgresDataLoader(BaseDataLoader):
     """
@@ -131,7 +134,7 @@ class PostgresDataLoader(BaseDataLoader):
             self._logger.info(f"Created database {self._db_params['database']}")
             return True
         finally:
-            conn.close()  # Ensure the connection is closed properly
+            self._release_connection(conn)  # Ensure the connection is closed properly
 
     def _get_file_type_and_reader(self, file_path: Union[str, Path]) -> Tuple[str, callable]:
         """
@@ -144,8 +147,44 @@ class PostgresDataLoader(BaseDataLoader):
             Tuple[str, callable]: File type and corresponding reader function
         """
         file_path = Path(file_path)
+
+        def read_parquet(file_path: Union[str, Path], nrows: int = None) -> pd.DataFrame:
+            """
+            Reads a Parquet file into a Pandas DataFrame, optionally limiting the number of rows.
+
+            Args:
+                file_path (Union[str, Path]): Path to the Parquet file.
+                nrows (int, optional): Number of rows to read. If None, reads the entire file.
+
+            Returns:
+                pd.DataFrame: A Pandas DataFrame containing the data.
+            """
+            # Open the Parquet file
+            parquet_file = pq.ParquetFile(file_path)
+
+            # If nrows is not specified, read the entire file
+            if nrows is None:
+                return parquet_file.read().to_pandas()
+
+            # Read the first n rows
+            rows_read = 0
+            tables = []
+
+            # Iterate through row groups until we have enough rows
+            for i in range(parquet_file.num_row_groups):
+                table = parquet_file.read_row_groups(row_groups=[i], columns=None)
+                tables.append(table)
+                rows_read += table.num_rows
+                if rows_read >= nrows:
+                    break
+
+            # Combine tables and select the first nrows rows
+            combined_table = pa.Table.from_batches([batch for table in tables for batch in table.to_batches()])
+            df = combined_table.to_pandas().head(nrows)
+            return df
+
         if file_path.suffix.lower()=='.parquet':
-            return 'parquet', pd.read_parquet
+            return 'parquet', read_parquet
         elif file_path.suffix.lower() in ['.csv', '.txt']:
             return 'csv', pd.read_csv
         else:
@@ -181,7 +220,8 @@ class PostgresDataLoader(BaseDataLoader):
         self._create_staging_table(table_name, staging_table)
 
         self._logger.info(f"Checking for duplicated or overlapping data")
-        if self._check_existing_data(file_path, table_name):
+        df = reader_func(file_path, nrows = 1000)
+        if self._check_data_overlap(df, table_name)['has_overlap']:
             self._logger.info(f"Data already exists in {table_name}")
             return
 
@@ -268,7 +308,12 @@ class PostgresDataLoader(BaseDataLoader):
     def _get_connection(self):
         """Get a connection from the pool instead of creating a new one."""
         try:
-            return self._pool.getconn()
+            _connection = self._pool.getconn()
+            if _connection.closed:
+                self._pool.putconn(_connection, close=True)  # Remove bad connection
+                _connection = self._pool.getconn()
+            self._logger.info(f"Total: {self._pool.maxconn}, In Use: {len(self._pool._used)}, Available: {len(self._pool._pool)}")
+            return _connection
         except Exception as e:
             self._logger.error(f"Failed to get a connection from the pool: {e}")
             raise
@@ -293,182 +338,207 @@ class PostgresDataLoader(BaseDataLoader):
         finally:
             self._release_connection(conn)
 
-    def _check_existing_data(self, file_path: Union[str, Path], target_table: str, sample_size: int = 50000) -> bool:
+    def _check_data_overlap(self, df: pd.DataFrame, target_table: str) -> Dict[str, Any]:
         """
-        An adaptive approach to detect duplicate data uploads that works with PostgresDataLoader.
-        Uses a combination of statistical analysis and selective sampling to efficiently detect duplicates.
-
-        The method operates in two phases:
-        1. Generate statistical fingerprints of the data based on column types and distributions
-        2. Perform smart sampling focusing on columns with high uniqueness
+        Quick check for overlapping time series data before upload.
+        Returns detailed information about any overlaps found.
 
         Args:
             file_path: Path to the data file
-            target_table: Name of the target table to check against
-            sample_size: Maximum number of rows to check in detailed comparison
+            target_table: Name of the target table ('raw', 'weather', or 'metadata')
 
         Returns:
-            bool: True if matching data exists, False otherwise
+            Dict with overlap information:
+            {
+                'has_overlap': bool,
+                'overlap_details': str,
+                'overlap_range': Tuple[datetime, datetime] or None,
+                'affected_entities': List[str]  # buildings/sites affected
+            }
         """
-        # Get the table's column information using the existing method
-        table_columns = self._get_table_columns(target_table)
+        # Load just enough rows to determine key entities and time range if applicable
 
-        if not table_columns:
-            raise ValueError(f"Could not retrieve column information for table {target_table}")
+        if target_table=='raw':
+            return self._check_existing_data(df, 'raw')
+        elif target_table=='weather':
+            return self._check_existing_data(df, 'weather')
+        elif target_table=='metadata':
+            return self._check_existing_data(df, 'metadata')
+        else:
+            raise ValueError(f"Unsupported table for overlap check: {target_table}")
 
-        # Sample the new data file
-        df = self._sampling_strategy.sample_data(file_path, sample_size)
-
-        # Validate column compatibility
-        df_columns = set(df.columns)
-        if not df_columns.issubset(table_columns):
-            extra_columns = df_columns - set(table_columns)
-            raise ValueError(f"Input data contains columns not present in target table: {extra_columns}")
-
-        # Phase 1: Find selective columns using column statistics
-        selective_columns = self._find_selective_columns(df, target_table, table_columns)
-
-        if not selective_columns:
-            # If no selective columns found, fall back to using all columns
-            selective_columns = list(df_columns)
-
-        # Phase 2: Perform efficient duplicate detection
-        return self._check_duplicates(df, target_table, selective_columns)
-
-    def _find_selective_columns(self, df: pd.DataFrame, target_table: str,
-                                table_columns: List[str]) -> List[str]:
+    def _check_existing_data(self, df: pd.DataFrame, target_table: str) -> Dict[str, Any]:
         """
-        Identify columns that are most useful for duplicate detection by analyzing
-        PostgreSQL's system statistics and index information.
-
-        This method examines several PostgreSQL system catalogs:
-        - pg_stats: Contains statistical information about table contents
-        - pg_attribute: Stores information about table columns
-        - pg_class: Contains table and index information
-        - pg_index: Stores index metadata
-
-        The selection prioritizes:
-        1. Columns that are part of primary or unique indexes
-        2. Columns with high cardinality (many distinct values)
-        3. Columns with low null ratios
-
-        Args:
-            df: Input DataFrame containing the new data
-            target_table: Name of the target table to check against
-            table_columns: List of columns in the target table
-
-        Returns:
-            List[str]: Names of columns best suited for duplicate detection
+        Common function to check for overlaps across all table types.
+        Handles both time series data (raw, weather) and metadata.
         """
-        # Query to analyze column statistics with explicit table references
-        stats_query = """
+        if target_table=='metadata':
+            return self._check_metadata_overlap(df)
+
+        # For time series data (raw and weather)
+        try:
+            min_time = pd.to_datetime(df['timestamp'].min())
+            max_time = pd.to_datetime(df['timestamp'].max())
+
+            # Get entity IDs based on table type
+            if target_table=='raw':
+                entities = list(df['building_id'].unique())  # Changed to list
+                meters = list(df['meter'].unique())  # Changed to list
+                entity_column = 'building_id'
+                additional_conditions = 'AND r.meter = ANY(%s::varchar[])'
+                table_alias = 'r'
+            else:  # weather
+                entities = list(df['site_id'].unique())  # Changed to list
+                entity_column = 'site_id'
+                additional_conditions = ''
+                table_alias = 'w'
+                meters = None
+
+        except KeyError as e:
+            raise ValueError(f"Missing required column: {e}")
+
+        query = f"""
+        WITH file_bounds AS (
             SELECT 
-                ps.attname as column_name,    -- Column name from pg_stats
-                ps.n_distinct,                -- Number of distinct values
-                ps.null_frac,                 -- Fraction of null values
-                CASE 
-                    WHEN idx.indisprimary THEN 1   -- Primary key
-                    WHEN idx.indisunique THEN 2    -- Unique index
-                    ELSE 3                         -- Regular column
-                END as key_priority
-            FROM pg_stats ps
-            -- Join with pg_attribute to get column metadata
-            JOIN pg_attribute pa 
-                ON (pa.attname = ps.attname 
-                    AND pa.attrelid = (
-                        SELECT oid 
-                        FROM pg_class 
-                        WHERE relname = %s
-                    ))
-            -- Join with pg_class to get table information
-            JOIN pg_class pc 
-                ON (pc.relname = ps.tablename 
-                    AND pc.relkind = 'r')
-            -- Left join with pg_index to identify indexed columns
-            LEFT JOIN pg_index idx 
-                ON (idx.indrelid = pc.oid 
-                    AND pa.attnum = ANY(idx.indkey))
-            WHERE ps.tablename = %s
-            AND ps.attname = ANY(%s)
-            AND ps.n_distinct > 0
-            ORDER BY 
-                key_priority,                 -- Prioritize indexed columns
-                ps.n_distinct DESC,           -- Then by unique values
-                ps.null_frac ASC             -- Then by fewest nulls
-            LIMIT 3
+                %s::timestamp as min_time,
+                %s::timestamp as max_time
+        )
+        SELECT 
+            EXISTS(
+                SELECT 1 
+                FROM {target_table} {table_alias}, file_bounds fb
+                WHERE {table_alias}.{entity_column} = ANY(%s::varchar[])
+                {additional_conditions}
+                AND {table_alias}.timestamp::timestamp BETWEEN fb.min_time - interval '1 hour' 
+                    AND fb.max_time + interval '1 hour'
+            ) as has_overlap,
+            CASE WHEN EXISTS(
+                SELECT 1 
+                FROM {target_table} {table_alias}, file_bounds fb
+                WHERE {table_alias}.{entity_column} = ANY(%s::varchar[])
+                {additional_conditions}
+                AND {table_alias}.timestamp::timestamp BETWEEN fb.min_time - interval '1 hour' 
+                    AND fb.max_time + interval '1 hour'
+            ) THEN
+                json_build_object(
+                    'start_time', (
+                        SELECT MIN({table_alias}.timestamp::timestamp)
+                        FROM {target_table} {table_alias}, file_bounds fb
+                        WHERE {table_alias}.{entity_column} = ANY(%s::varchar[])
+                        {additional_conditions}
+                        AND {table_alias}.timestamp::timestamp BETWEEN fb.min_time - interval '1 hour' 
+                            AND fb.max_time + interval '1 hour'
+                    ),
+                    'end_time', (
+                        SELECT MAX({table_alias}.timestamp::timestamp)
+                        FROM {target_table} {table_alias}, file_bounds fb
+                        WHERE {table_alias}.{entity_column} = ANY(%s::varchar[])
+                        {additional_conditions}
+                        AND {table_alias}.timestamp::timestamp BETWEEN fb.min_time - interval '1 hour' 
+                            AND fb.max_time + interval '1 hour'
+                    ),
+                    'entities', (
+                        SELECT array_agg(DISTINCT {table_alias}.{entity_column})
+                        FROM {target_table} {table_alias}, file_bounds fb
+                        WHERE {table_alias}.{entity_column} = ANY(%s::varchar[])
+                        {additional_conditions}
+                        AND {table_alias}.timestamp::timestamp BETWEEN fb.min_time - interval '1 hour' 
+                            AND fb.max_time + interval '1 hour'
+                    )
+                )::text
+            ELSE
+                NULL
+            END as overlap_details
         """
-
-        # Get available columns that exist in both the DataFrame and target table
-        available_columns = [col for col in table_columns if col in df.columns]
 
         conn = self._get_connection()
         try:
             with conn.cursor() as cur:
-                # Execute query with table name appearing twice:
-                # 1. For the pg_attribute join condition
-                # 2. For the pg_stats WHERE clause
-                cur.execute(stats_query, (target_table, target_table, available_columns))
-                results = cur.fetchall()
+                # Prepare query parameters
+                params = [min_time, max_time]
+                # Add entities for each condition
+                for _ in range(5):  # We use entities 5 times in the query
+                    params.append(entities)
+                    if meters is not None:
+                        params.append(meters)
 
-                # Extract column names from results
-                selected_columns = [row[0] for row in results]
+                cur.execute(query, tuple(params))
+                has_overlap, overlap_details = cur.fetchone()
 
-                # If no columns were selected, fall back to all available columns
-                if not selected_columns:
-                    return available_columns
+                if not has_overlap:
+                    return {
+                        'has_overlap': False,
+                        'overlap_details': None,
+                        'overlap_range': None,
+                        'affected_entities': []
+                    }
 
-                return selected_columns
+                details = json.loads(overlap_details)
+                entity_type = 'building(s)' if target_table=='raw' else 'site(s)'
+
+                return {
+                    'has_overlap': True,
+                    'overlap_details': (
+                        f"Found overlapping data for {entity_type} {', '.join(details['entities'])} "
+                        f"between {details['start_time']} and {details['end_time']}"
+                    ),
+                    'overlap_range': (
+                        pd.to_datetime(details['start_time']),
+                        pd.to_datetime(details['end_time'])
+                    ),
+                    'affected_entities': details['entities']
+                }
         finally:
             self._release_connection(conn)
 
-    def _check_duplicates(self, df: pd.DataFrame, target_table: str,
-                          check_columns: List[str]) -> bool:
-        """
-        Check for duplicates using the most effective columns identified.
-        Uses batched queries and database indexes for efficiency.
+    def _check_metadata_overlap(self, df: pd.DataFrame) -> Dict[str, Any]:
+        """Check for overlapping building metadata."""
+        try:
+            buildings = list(df['building_id'].unique())  # Changed to list
+        except KeyError as e:
+            raise ValueError(f"Missing required column: {e}")
 
-        The method creates a query that:
-        1. Uses indexed columns when available
-        2. Handles NULL values correctly
-        3. Uses EXISTS for early termination
-        4. Limits the result set for performance
-        """
-        # Sample a subset of rows for checking
-        sample_size = min(1000, len(df))
-        sampled_df = df[check_columns].sample(n=sample_size)
-
-        # Build an efficient query using the selected columns
-        conditions = []
-        params = []
-
-        # Generate comparison conditions for each sampled row
-        for _, row in sampled_df.iterrows():
-            row_conditions = []
-            for col in check_columns:
-                if pd.isna(row[col]):
-                    row_conditions.append(f"{col} IS NULL")
-                else:
-                    row_conditions.append(f"{col} = %s")
-                    params.append(row[col])
-            conditions.append(f"({' AND '.join(row_conditions)})")
-
-        if not conditions:
-            return False
-
-        # Use EXISTS for better performance
-        query = f"""
-        SELECT EXISTS (
-            SELECT 1 FROM {target_table}
-            WHERE {' OR '.join(conditions)}
-            LIMIT 1
-        )
+        query = """
+        SELECT 
+            EXISTS(
+                SELECT 1 
+                FROM metadata m
+                WHERE m.building_id = ANY(%s::varchar[])
+            ) as has_overlap,
+            CASE WHEN EXISTS(
+                SELECT 1 
+                FROM metadata m
+                WHERE m.building_id = ANY(%s::varchar[])
+            ) THEN
+                (SELECT json_agg(m.building_id)
+                 FROM metadata m
+                 WHERE m.building_id = ANY(%s::varchar[]))::text
+            ELSE
+                NULL
+            END as existing_buildings
         """
 
         conn = self._get_connection()
         try:
             with conn.cursor() as cur:
-                cur.execute(query, params)
-                return cur.fetchone()[0]
+                cur.execute(query, (buildings, buildings, buildings))
+                has_overlap, existing_buildings = cur.fetchone()
+
+                if not has_overlap:
+                    return {
+                        'has_overlap': False,
+                        'overlap_details': None,
+                        'overlap_range': None,
+                        'affected_entities': []
+                    }
+
+                existing = json.loads(existing_buildings)
+                return {
+                    'has_overlap': True,
+                    'overlap_details': f"Found existing metadata for building(s): {', '.join(existing)}",
+                    'overlap_range': None,  # Metadata doesn't have time range
+                    'affected_entities': existing
+                }
         finally:
             self._release_connection(conn)
 
@@ -521,7 +591,8 @@ class PostgresDataLoader(BaseDataLoader):
                 # Integer columns that need special handling
                 integer_columns = ['site_id_kaggle', 'building_id_kaggle','sqft',
                                    'yearbuilt', 'numberoffloors',
-                                   'occupants']
+                                   'occupants', 'precipDepth1HR', 'windDirection',
+                                   'cloudCoverage', 'windDirection','precipDepth6HR']
 
                 df = apply_to_columns(df, integer_columns, convert_to_numeric_int64)
 
@@ -711,7 +782,7 @@ class PostgresDataLoader(BaseDataLoader):
 
         finally:
             if conn:
-                conn.close()
+                self._release_connection(conn)
 
     def _get_table_columns(self, table_name: str) -> list:
         """
@@ -724,14 +795,18 @@ class PostgresDataLoader(BaseDataLoader):
         Returns:
             list: Ordered list of column names
         """
-        with self._get_connection().cursor() as cur:
-            cur.execute("""
-                SELECT column_name 
-                FROM information_schema.columns 
-                WHERE table_name = %s 
-                ORDER BY ordinal_position
-            """, (table_name,))
-            return [row[0] for row in cur.fetchall()]
+        conn = self._get_connection()  # Get connection explicitly
+        try:
+            with conn.cursor() as cur:
+                cur.execute("""
+                        SELECT column_name 
+                        FROM information_schema.columns 
+                        WHERE table_name = %s 
+                        ORDER BY ordinal_position
+                    """, (table_name,))
+                return [row[0] for row in cur.fetchall()]
+        finally:
+            self._release_connection(conn)  # FIX: Release connection
 
     def _cleanup_staging(self, staging_table: str):
         """Drop the staging table."""
@@ -855,19 +930,19 @@ class PostgresDataLoader(BaseDataLoader):
     def _generate_schema(self):
         pass
 
-    @staticmethod
-    def _table_exists(conn, table_name):
-        """Check if a table exists in the database."""
-        query = """
-            SELECT EXISTS (
-                SELECT 1
-                FROM pg_tables
-                WHERE tablename = %s
-            );
-        """
-        with conn.cursor() as cur:
-            cur.execute(query, (table_name,))
-            return cur.fetchone()[0]  # Returns True or False
+    def _table_exists(self, conn, table_name):
+        try:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT EXISTS (
+                        SELECT 1
+                        FROM pg_tables
+                        WHERE tablename = %s
+                    );
+                """, (table_name,))
+                return cur.fetchone()[0]
+        finally:
+            self._release_connection(conn)
 
     def _create_table(self,
                       schema_file: Union[str, Path],
