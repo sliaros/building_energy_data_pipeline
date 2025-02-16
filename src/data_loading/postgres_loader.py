@@ -771,7 +771,7 @@ class PostgresDataLoader(BaseDataLoader):
 
                             # Log progress periodically
                             if total_processed % 100000==0:
-                                self._logger.info(f"Processed {total_processed:,} rows so far")
+                                tqdm.write(f"Processed {total_processed:,} rows so far")
 
                     self._logger.info(f"Successfully merged {total_processed:,} rows into {target_table}")
 
