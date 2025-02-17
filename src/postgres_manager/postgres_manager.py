@@ -26,7 +26,7 @@ class DatabaseConfig:
     connection_timeout: int = 30
     query_timeout: int = 30000  # milliseconds
     enable_ssl: bool = True
-    ssl_mode: str = "verify-full"
+    ssl_mode: str = "prefer"
     replication_slot: Optional[str] = None
     standby_servers: List[str] = None
 
@@ -858,9 +858,9 @@ if __name__=="__main__":
     config = DatabaseConfig(
         host="localhost",
         port=5432,
-        database="example_db",
+        database="building_energy_staging_db_v2",
         user="postgres",
-        password="secure_password"
+        password="postgres"
     )
 
     db = PostgresManager(config)
