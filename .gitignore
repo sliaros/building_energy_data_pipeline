@@ -9,5 +9,8 @@ __pycache__/
 *.zip
 *.csv
 *.parquet
-
+*.crt
+*.key
+*.pem
+.env
 

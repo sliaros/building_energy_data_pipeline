@@ -12,6 +12,14 @@ project_data:
                    'weather': ['timestamp', 'site_id'],
                    'raw': ['timestamp', 'building_id', 'meter']}
 
+logging:
+  log_file_path: 'C:\\slPrivateData\\00_portfolio\\building_energy_data_pipeline\\\logs\\application.log'
+
+ssl:
+  ssl_cert_path: "cert.pem"
+  postgresql_conf : "C:/Program Files/PostgreSQL/17/data/postgresql.conf"
+  pg_hba_conf : "C:/Program Files/PostgreSQL/17/data/pg_hba.conf"
+
 staging_database:
   host: "localhost"
   port: 5432

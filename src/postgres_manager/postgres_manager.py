@@ -11,6 +11,7 @@ import json
 import threading
 import backoff
 import os
+from logs.logging_config import setup_logging
 
 
 @dataclass
@@ -20,6 +21,7 @@ class DatabaseConfig:
     database: str
     user: str
     password: str
+    logger: Optional[logging.Logger] = None
     application_name: str = "DBManager"
     min_connections: int = 5
     max_connections: int = 20
@@ -29,28 +31,23 @@ class DatabaseConfig:
     ssl_mode: str = "prefer"
     replication_slot: Optional[str] = None
     standby_servers: List[str] = None
+    postgresql_conf: Optional[str] = None
+    pg_hba_conf: Optional[str] = None
 
 
 class PostgresManager:
     def __init__(self, config: DatabaseConfig):
         self.config = config
-        self._setup_logging()
+        self._logger = config.logger or logging.getLogger(self.__class__.__name__)
+        if not self._logger.hasHandlers():
+            setup_logging(
+                log_file='C:\\slPrivateData\\00_portfolio\\building_energy_data_pipeline\\logs\\application.log')
+
         self._connection_pool = []
         self._pool_lock = threading.Lock()
         self._initialize_connection_pool()
         self.query_history = []
         self.max_query_history = 1000
-
-    def _setup_logging(self) -> None:
-        """Configure logging with detailed formatting."""
-        self.logger = logging.getLogger("PostgresManager")
-        self.logger.setLevel(logging.INFO)
-        formatter = logging.Formatter(
-            '%(asctime)s - %(name)s - [%(levelname)s] - %(message)s'
-        )
-        handler = logging.StreamHandler()
-        handler.setFormatter(formatter)
-        self.logger.addHandler(handler)
 
     @backoff.on_exception(backoff.expo,
         (psycopg2.OperationalError, psycopg2.InterfaceError),
@@ -78,7 +75,7 @@ class PostgresManager:
 
             return conn
         except Exception as e:
-            self.logger.error(f"Connection creation failed: {str(e)}")
+            self._logger.error(f"Connection creation failed: {str(e)}")
             raise
 
     def _initialize_connection_pool(self) -> None:
@@ -129,7 +126,7 @@ class PostgresManager:
                     self._log_query(query, params, execution_time)
                     return result
         except Exception as e:
-            self.logger.error(f"Query execution failed: {str(e)}")
+            self._logger.error(f"Query execution failed: {str(e)}")
             raise
 
     def _log_query(self, query: str, params: Optional[tuple], execution_time: float) -> None:
@@ -168,10 +165,10 @@ class PostgresManager:
 
         try:
             self.execute_query(create_query)
-            self.logger.info(f"Table {table_name} created successfully")
+            self._logger.info(f"Table {table_name} created successfully")
             return True
         except Exception as e:
-            self.logger.error(f"Failed to create table {table_name}: {str(e)}")
+            self._logger.error(f"Failed to create table {table_name}: {str(e)}")
             return False
 
     def drop_table(self, table_name: str, cascade: bool = False) -> bool:
@@ -190,11 +187,11 @@ class PostgresManager:
                 cascade_str = "CASCADE" if cascade else ""
                 drop_query = f"DROP TABLE {table_name} {cascade_str}"
                 self.execute_query(drop_query)
-                self.logger.info(f"Table {table_name} dropped successfully")
+                self._logger.info(f"Table {table_name} dropped successfully")
                 return True
             return False
         except Exception as e:
-            self.logger.error(f"Failed to drop table {table_name}: {str(e)}")
+            self._logger.error(f"Failed to drop table {table_name}: {str(e)}")
             return False
 
     # Database Health Methods
@@ -233,7 +230,7 @@ class PostgresManager:
 
     def get_slow_queries(self, threshold_seconds: int = 1) -> List[Dict[str, Any]]:
         """Get currently running slow queries."""
-        query = """
+        query = f"""
             SELECT
                 pid,
                 usename,
@@ -245,10 +242,10 @@ class PostgresManager:
             FROM pg_stat_activity
             WHERE state = 'active'
                 AND query NOT LIKE '%pg_stat_activity%'
-                AND query_start < NOW() - interval '%s seconds'
+                AND query_start < NOW() - interval '{threshold_seconds} seconds'
             ORDER BY query_start
         """
-        return self.execute_query(query, (threshold_seconds,))
+        return self.execute_query(query)  # No need for parameters
 
     def get_index_usage_stats(self) -> List[Dict[str, Any]]:
         """Get detailed index usage statistics."""
@@ -296,7 +293,7 @@ class PostgresManager:
                 conn.set_isolation_level(old_isolation_level)
             return True
         except Exception as e:
-            self.logger.error(f"Vacuum analyze failed for {table_name}: {str(e)}")
+            self._logger.error(f"Vacuum analyze failed for {table_name}: {str(e)}")
             return False
 
     def reindex_table(self, table_name: str, concurrent: bool = True) -> bool:
@@ -307,7 +304,7 @@ class PostgresManager:
             self.execute_query(query)
             return True
         except Exception as e:
-            self.logger.error(f"Reindex failed for {table_name}: {str(e)}")
+            self._logger.error(f"Reindex failed for {table_name}: {str(e)}")
             return False
 
     # Backup and Restore Methods
@@ -328,7 +325,7 @@ class PostgresManager:
             subprocess.run(cmd, env=env, check=True)
             return True
         except Exception as e:
-            self.logger.error(f"Backup failed: {str(e)}")
+            self._logger.error(f"Backup failed: {str(e)}")
             return False
 
     # Utility Methods
@@ -413,7 +410,7 @@ class PostgresManager:
             self.execute_query(create_query)
             return True
         except Exception as e:
-            self.logger.error(f"Failed to create partitioned table: {str(e)}")
+            self._logger.error(f"Failed to create partitioned table: {str(e)}")
             return False
 
     def create_table_partition(self, table_name: str, partition_name: str,
@@ -428,7 +425,7 @@ class PostgresManager:
             self.execute_query(create_query)
             return True
         except Exception as e:
-            self.logger.error(f"Failed to create partition: {str(e)}")
+            self._logger.error(f"Failed to create partition: {str(e)}")
             return False
 
     def detach_partition(self, table_name: str, partition_name: str) -> bool:
@@ -438,7 +435,7 @@ class PostgresManager:
             self.execute_query(query)
             return True
         except Exception as e:
-            self.logger.error(f"Failed to detach partition: {str(e)}")
+            self._logger.error(f"Failed to detach partition: {str(e)}")
             return False
 
     # Advanced Query Optimization Methods
@@ -555,17 +552,17 @@ class PostgresManager:
         queries = {
             'heap_read_ratio': """
                 SELECT
-                    sum(heap_blks_hit) / (sum(heap_blks_hit) + sum(heap_blks_read)) as ratio
+                    sum(heap_blks_hit) / NULLIF(sum(heap_blks_hit) + sum(heap_blks_read), 0) as ratio
                 FROM pg_statio_user_tables
             """,
             'index_read_ratio': """
                 SELECT
-                    sum(idx_blks_hit) / (sum(idx_blks_hit) + sum(idx_blks_read)) as ratio
+                    sum(idx_blks_hit) / NULLIF(sum(idx_blks_hit) + sum(idx_blks_read), 0) as ratio
                 FROM pg_statio_user_indexes
             """,
             'toast_read_ratio': """
                 SELECT
-                    sum(toast_blks_hit) / (sum(toast_blks_hit) + sum(toast_blks_read)) as ratio
+                    sum(toast_blks_hit) / NULLIF(sum(toast_blks_hit) + sum(toast_blks_read), 0) as ratio
                 FROM pg_statio_user_tables
             """
         }
@@ -666,7 +663,7 @@ class PostgresManager:
                         cur.copy_expert(query, f)
             return True
         except Exception as e:
-            self.logger.error(f"Failed to export table to CSV: {str(e)}")
+            self._logger.error(f"Failed to export table to CSV: {str(e)}")
             return False
 
     def import_csv_to_table(self, table_name: str, file_path: str,
@@ -682,7 +679,7 @@ class PostgresManager:
                 conn.commit()
             return True
         except Exception as e:
-            self.logger.error(f"Failed to import CSV to table: {str(e)}")
+            self._logger.error(f"Failed to import CSV to table: {str(e)}")
             return False
 
     # Schema Management Methods
@@ -808,7 +805,7 @@ class PostgresManager:
                 'wal': plan[0].get('WAL', {})
             }
         except Exception as e:
-            self.logger.error(f"Failed to analyze query plan: {str(e)}")
+            self._logger.error(f"Failed to analyze query plan: {str(e)}")
             return None
 
     # Advanced Maintenance Methods
@@ -830,7 +827,7 @@ class PostgresManager:
 
             return True
         except Exception as e:
-            self.logger.error(f"Failed to rebuild indexes: {str(e)}")
+            self._logger.error(f"Failed to rebuild indexes: {str(e)}")
             return False
 
     def optimize_table_storage(self, table_name: str) -> bool:
@@ -848,7 +845,7 @@ class PostgresManager:
 
             return True
         except Exception as e:
-            self.logger.error(f"Failed to optimize table storage: {str(e)}")
+            self._logger.error(f"Failed to optimize table storage: {str(e)}")
             return False
 
 

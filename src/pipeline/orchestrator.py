@@ -19,18 +19,19 @@ class Orchestrator:
         :param config_path: The path to a YAML configuration file
         """
 
-        self._project_file_structure = FileUtils()._load_yaml_file(
-            FileUtils()._define_local_file_path(
-        'config', 'project_structure_config.yaml'
-            )
+        self._project_file_structure, self._config = (
+            FileUtils()._load_yaml_file(
+                FileUtils()._define_local_file_path(
+                    'config', _config_file
+                )
+            ) for _config_file in ['project_structure_config.yaml', 'app_config.yaml']
         )
+
         self._create_directories_from_yaml(self._project_file_structure)
 
-        setup_logging()
+        setup_logging(log_file=self._config['logging']['log_file_path'])
         self._logger = logging.getLogger(self.__class__.__name__)
         self._logger.info('Orchestrator started')
-
-        self._config = self._load_config()
 
     @staticmethod
     def _create_directories_from_yaml(yaml_content, base_path='.'):

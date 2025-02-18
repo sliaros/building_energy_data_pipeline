@@ -1,7 +1,7 @@
 import logging
 from logging.handlers import RotatingFileHandler
 
-def setup_logging(log_file='logs/application.log', max_bytes=5*1024*1024, backup_count=3):
+def setup_logging(log_file=None, max_bytes=5*1024*1024, backup_count=3):
     """
     Configures the logging system.
 
