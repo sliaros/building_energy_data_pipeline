@@ -80,6 +80,72 @@ class PostgresManager:
             self._logger.error(f"Connection creation failed: {str(e)}")
             raise
 
+    def verify_connection(self) -> bool:
+        """
+        Verify and create database if it doesn't exist.
+
+        Returns:
+            bool: Connection status
+        """
+        try:
+            # Try to create a connection using the established connection method
+            with self._create_connection() as conn:
+                self._logger.info("Successfully connected to database")
+                return True
+        except psycopg2.OperationalError as e:
+            if "does not exist" in str(e):
+                return self._create_database()
+            self._logger.error(f"Connection verification failed: {str(e)}")
+            raise
+
+    def _create_database(self) -> bool:
+        """
+        Create a new database if it doesn't exist.
+
+        Returns:
+            bool: Database creation status
+        """
+        # Create a modified configuration for connecting to 'postgres' database
+        temp_config = DatabaseConfig(
+            host=self.config.host,
+            port=self.config.port,
+            database='postgres',  # Connect to default postgres database
+            user=self.config.user,
+            password=self.config.password,
+            logger=self.config.logger,
+            application_name=self.config.application_name,
+            connection_timeout=self.config.connection_timeout,
+            enable_ssl=self.config.enable_ssl,
+            ssl_mode=self.config.ssl_mode
+        )
+
+        try:
+            # Create connection to postgres database with autocommit mode
+            conn = psycopg2.connect(
+                host=temp_config.host,
+                port=temp_config.port,
+                database=temp_config.database,
+                user=temp_config.user,
+                password=temp_config.password,
+                application_name=temp_config.application_name,
+                connect_timeout=temp_config.connection_timeout,
+                sslmode=temp_config.ssl_mode if temp_config.enable_ssl else 'disable'
+            )
+            conn.autocommit = True  # Enable autocommit
+
+            try:
+                with conn.cursor() as cur:
+                    cur.execute(f"CREATE DATABASE {self.config.database}")
+                self._logger.info(f"Created database {self.config.database}")
+                return True
+            finally:
+                if conn and not conn.closed:
+                    conn.close()
+
+        except Exception as e:
+            self._logger.error(f"Database creation failed: {str(e)}")
+            return False
+
     def _initialize_connection_pool(self) -> None:
         """Initialize the connection pool with minimum connections."""
         for _ in range(self.config.min_connections):

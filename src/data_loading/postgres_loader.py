@@ -18,6 +18,10 @@ import csv
 from src.schema_generator.sampling_strategies import BaseSamplingStrategy, RandomSamplingStrategy
 import json
 from src.utility.file_utils import FileUtils
+from logs.logging_config import setup_logging
+import logging
+from src.postgres_managing.postgres_manager import PostgresManager, DatabaseConfig
+import threading
 
 class PostgresDataLoader(BaseDataLoader):
     """
@@ -37,16 +41,37 @@ class PostgresDataLoader(BaseDataLoader):
                 sampling_strategy: Optional[BaseSamplingStrategy] = None
         ):
             self._config = config
-            self._logger = logger
+            self._logger = logger or logging.getLogger(self.__class__.__name__)
+
+            if not self._logger.hasHandlers():
+                setup_logging(
+                    log_file='C:\\slPrivateData\\00_portfolio\\building_energy_data_pipeline\\logs\\application.log')
+
             self._file_utils = file_utils
+
             self._max_workers = max_workers
             self._max_retries = max_retries
             self._retry_delay = retry_delay
 
             self._db_params = self._get_db_params(db_type, db_params)
+            self._db_config = DatabaseConfig(
+                                    host=self._db_params['host'],
+                                    port=self._db_params['port'],
+                                    database=self._db_params['database'],
+                                    user=self._db_params['user'],
+                                    password=self._db_params['password']
+                                )
+
+            self._database_manager = PostgresManager(self._db_config)
+
+            self._connection_pool = []
+            self._pool_lock = threading.Lock()
+
+            if not self._database_manager.verify_connection():
+                raise Exception(f"Failed to connect to or create database {self._db_config.database}")
+
             self._sqlalchemy_url = self._postgres_params_to_sqlalchemy_url()
 
-            self._verify_connection()
             self._engine = create_engine(
                 self._postgres_params_to_sqlalchemy_url(),
                 pool_size=max_workers,
@@ -96,44 +121,6 @@ class PostgresDataLoader(BaseDataLoader):
             else self._config['database']
         )
 
-    def _verify_connection(self) -> bool:
-        """
-        Verify and create database if it doesn't exist.
-
-        Returns:
-            bool: Connection status
-        """
-        try:
-            with psycopg2.connect(**self._db_params) as conn:
-                self._logger.info("Successfully connected to database")
-                return True
-        except psycopg2.OperationalError as e:
-            if "does not exist" in str(e):
-                return self._create_database()
-            raise
-
-    def _create_database(self) -> bool|None:
-        """
-        Create a new database if it doesn't exist.
-
-        Returns:
-            bool: Database creation status
-        """
-        temp_params = self._db_params.copy()
-        temp_params['database'] = 'postgres'  # Connect to the default 'postgres' database
-
-        # Open a connection without a transaction block
-        conn = psycopg2.connect(**temp_params)
-        conn.autocommit = True  # Enable autocommit before using the cursor
-
-        try:
-            with conn.cursor() as cur:
-                cur.execute(f"CREATE DATABASE {self._db_params['database']}")
-            self._logger.info(f"Created database {self._db_params['database']}")
-            return True
-        finally:
-            self._release_connection(conn)  # Ensure the connection is closed properly
-
     def load_data(
             self,
             file_path: Union[str, Path],
@@ -156,7 +143,7 @@ class PostgresDataLoader(BaseDataLoader):
         chunk_statuses: List[Dict] = []
 
         # Determine file type and get appropriate reader
-        file_type, reader_func = FileUtils.get_file_type_and_reader(file_path)
+        file_type, reader_func = FileUtils.FileReader.get_file_type_and_reader(file_path)
         self._logger.info(f"Processing {file_type} file: {file_path}")
 
         # Create staging table
@@ -311,7 +298,7 @@ class PostgresDataLoader(BaseDataLoader):
         else:
             raise ValueError(f"Unsupported table for overlap check: {target_table}")
 
-    def _check_existing_data(self, df: pd.DataFrame, target_table: str) -> Dict[str, Any]:
+    def _check_existing_data(self, df: pd.DataFrame, target_table: str) -> Dict[str, Any]|None:
         """
         Common function to check for overlaps across all table types.
         Handles both time series data (raw, weather) and metadata.
