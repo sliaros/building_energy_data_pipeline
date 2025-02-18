@@ -12,6 +12,7 @@ import threading
 import backoff
 import os
 from logs.logging_config import setup_logging
+from functools import lru_cache
 
 
 @dataclass
@@ -39,6 +40,7 @@ class PostgresManager:
     def __init__(self, config: DatabaseConfig):
         self.config = config
         self._logger = config.logger or logging.getLogger(self.__class__.__name__)
+
         if not self._logger.hasHandlers():
             setup_logging(
                 log_file='C:\\slPrivateData\\00_portfolio\\building_energy_data_pipeline\\logs\\application.log')
@@ -109,7 +111,7 @@ class PostgresManager:
     def execute_query(self, query: str, params: Optional[tuple] = None,
                       fetch_all: bool = True) -> Union[List[Dict], Dict, None]:
         """Execute a query with proper error handling and logging."""
-        start_time = time.time()
+        start_time = datetime.now()
         try:
             with self.get_connection() as conn:
                 with conn.cursor(cursor_factory=DictCursor) as cur:
@@ -122,7 +124,7 @@ class PostgresManager:
                         result = cur.rowcount
                         conn.commit()
 
-                    execution_time = time.time() - start_time
+                    execution_time = (datetime.now() - start_time).total_seconds()
                     self._log_query(query, params, execution_time)
                     return result
         except Exception as e:
@@ -174,19 +176,12 @@ class PostgresManager:
     def drop_table(self, table_name: str, cascade: bool = False) -> bool:
         """Drop a table with safety checks."""
         try:
-            # Check if table exists
-            exists_query = """
-                SELECT EXISTS (
-                    SELECT FROM information_schema.tables 
-                    WHERE table_name = %s
-                )
-            """
+            exists_query = "SELECT to_regclass(%s) IS NOT NULL"
             exists = self.execute_query(exists_query, (table_name,), fetch_all=False)
 
-            if exists:
+            if exists and exists.get("to_regclass"):
                 cascade_str = "CASCADE" if cascade else ""
-                drop_query = f"DROP TABLE {table_name} {cascade_str}"
-                self.execute_query(drop_query)
+                self.execute_query(f"DROP TABLE {table_name} {cascade_str}")
                 self._logger.info(f"Table {table_name} dropped successfully")
                 return True
             return False
@@ -279,6 +274,45 @@ class PostgresManager:
             ORDER BY bloat_ratio DESC
         """
         return self.execute_query(query)
+
+    @lru_cache(maxsize=100)
+    def _cached_query(self, query_hash, fetch_all=True):
+        """Internal method to handle cached queries."""
+        # Extract query and params from hash
+        query, params_str = query_hash.split('|')
+        params = eval(params_str) if params_str else None
+
+        with self.get_connection() as conn:
+            with conn.cursor(cursor_factory=DictCursor) as cur:
+                cur.execute(query, params)
+                if cur.description:  # Select query
+                    result = cur.fetchall() if fetch_all else cur.fetchone()
+                    return [dict(row) for row in result] if fetch_all else (dict(result) if result else None)
+                else:  # DML query
+                    conn.commit()
+                    return cur.rowcount
+
+    def execute_cached_query(self, query: str, params: Optional[tuple] = None,
+                             fetch_all: bool = True, ttl: int = 60) -> Union[List[Dict], Dict, None]:
+        """Execute a cached query with specified TTL (in seconds)."""
+        # Only cache SELECT queries
+        if not query.strip().upper().startswith('SELECT'):
+            return self.execute_query(query, params, fetch_all)
+
+        # Create a unique hash for this query and params
+        query_hash = f"{query}|{str(params)}"
+
+        # Get result from cache or execute query
+        start_time = time.time()
+        result = self._cached_query(query_hash, fetch_all)
+        execution_time = time.time() - start_time
+
+        self._log_query(query, params, execution_time, cached=True)
+        return result
+
+    def clear_query_cache(self):
+        """Clear the query cache."""
+        self._cached_query.cache_clear()
 
     # Database Maintenance Methods
     def vacuum_analyze_table(self, table_name: str, full: bool = False) -> bool:
@@ -650,16 +684,22 @@ class PostgresManager:
         return self.execute_query(query)
 
     # Data Export/Import Methods
-    def export_table_to_csv(self, table_name: str, output_path: str,
-                            columns: Optional[List[str]] = None) -> bool:
-        """Export table data to CSV file."""
+    def get_columns(self, table_name: str) -> List[str]:
+        query = """
+            SELECT column_name FROM information_schema.columns
+            WHERE table_name = %s
+            ORDER BY ordinal_position
+        """
+        return [col["column_name"] for col in self.execute_query(query, (table_name,))]
+
+    def export_table_to_csv(self, table_name: str, output_path: str) -> bool:
         try:
-            cols = "*" if not columns else ", ".join(columns)
-            query = f"COPY (SELECT {cols} FROM {table_name}) TO STDOUT WITH CSV HEADER"
+            columns = self.get_columns(table_name)
+            query = f"COPY (SELECT {', '.join(columns)} FROM {table_name}) TO STDOUT WITH CSV HEADER"
 
             with self.get_connection() as conn:
                 with conn.cursor() as cur:
-                    with open(output_path, 'w') as f:
+                    with open(output_path, "w") as f:
                         cur.copy_expert(query, f)
             return True
         except Exception as e:
@@ -793,17 +833,7 @@ class PostgresManager:
         """
         try:
             plan = self.execute_query(explain_query, fetch_all=False)
-            return {
-                'plan': plan[0],
-                'execution_time': plan[0]['Plan']['Actual Total Time'],
-                'planning_time': plan[0]['Plan']['Planning Time'],
-                'buffers': {
-                    'shared_hit': plan[0]['Plan'].get('Shared Hit Blocks', 0),
-                    'shared_read': plan[0]['Plan'].get('Shared Read Blocks', 0),
-                    'shared_written': plan[0]['Plan'].get('Shared Written Blocks', 0),
-                },
-                'wal': plan[0].get('WAL', {})
-            }
+            return json.loads(plan[0])
         except Exception as e:
             self._logger.error(f"Failed to analyze query plan: {str(e)}")
             return None

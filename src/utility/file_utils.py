@@ -4,7 +4,10 @@ import logging
 import yaml
 import pandas as pd
 from collections import defaultdict
-from typing import Dict, List
+from typing import Dict, List, Union, Tuple
+import pyarrow.parquet as pq
+import pyarrow as pa
+from pathlib import Path
 
 class FileUtils:
     """Utility class for handling file-related operations."""
@@ -280,3 +283,58 @@ class FileUtils:
         else:
             self._logger.warning(f"No file folders detected in root folder {root_folder} containing files with extension {extension}")
             return file_folders
+
+    @staticmethod
+    def get_file_type_and_reader(file_path: Union[str, Path]) -> Tuple[str, callable]:
+        """
+        Determine file type and return appropriate reader function.
+
+        Args:
+            file_path: Path to the file
+
+        Returns:
+            Tuple[str, callable]: File type and corresponding reader function
+        """
+        file_path = Path(file_path)
+
+        def read_parquet(file_path: Union[str, Path], nrows: int = None) -> pd.DataFrame:
+            """
+            Reads a Parquet file into a Pandas DataFrame, optionally limiting the number of rows.
+
+            Args:
+                file_path (Union[str, Path]): Path to the Parquet file.
+                nrows (int, optional): Number of rows to read. If None, reads the entire file.
+
+            Returns:
+                pd.DataFrame: A Pandas DataFrame containing the data.
+            """
+            # Open the Parquet file
+            parquet_file = pq.ParquetFile(file_path)
+
+            # If nrows is not specified, read the entire file
+            if nrows is None:
+                return parquet_file.read().to_pandas()
+
+            # Read the first n rows
+            rows_read = 0
+            tables = []
+
+            # Iterate through row groups until we have enough rows
+            for i in range(parquet_file.num_row_groups):
+                table = parquet_file.read_row_groups(row_groups=[i], columns=None)
+                tables.append(table)
+                rows_read += table.num_rows
+                if rows_read >= nrows:
+                    break
+
+            # Combine tables and select the first nrows rows
+            combined_table = pa.Table.from_batches([batch for table in tables for batch in table.to_batches()])
+            df = combined_table.to_pandas().head(nrows)
+            return df
+
+        if file_path.suffix.lower()=='.parquet':
+            return 'parquet', read_parquet
+        elif file_path.suffix.lower() in ['.csv', '.txt']:
+            return 'csv', pd.read_csv
+        else:
+            raise ValueError(f"Unsupported file type: {file_path.suffix}")

@@ -16,10 +16,8 @@ from .base_loader import BaseDataLoader
 import shutil
 import csv
 from src.schema_generator.sampling_strategies import BaseSamplingStrategy, RandomSamplingStrategy
-import pyarrow.parquet as pq
-import pyarrow as pa
 import json
-import re
+from src.utility.file_utils import FileUtils
 
 class PostgresDataLoader(BaseDataLoader):
     """
@@ -136,60 +134,6 @@ class PostgresDataLoader(BaseDataLoader):
         finally:
             self._release_connection(conn)  # Ensure the connection is closed properly
 
-    def _get_file_type_and_reader(self, file_path: Union[str, Path]) -> Tuple[str, callable]:
-        """
-        Determine file type and return appropriate reader function.
-
-        Args:
-            file_path: Path to the file
-
-        Returns:
-            Tuple[str, callable]: File type and corresponding reader function
-        """
-        file_path = Path(file_path)
-
-        def read_parquet(file_path: Union[str, Path], nrows: int = None) -> pd.DataFrame:
-            """
-            Reads a Parquet file into a Pandas DataFrame, optionally limiting the number of rows.
-
-            Args:
-                file_path (Union[str, Path]): Path to the Parquet file.
-                nrows (int, optional): Number of rows to read. If None, reads the entire file.
-
-            Returns:
-                pd.DataFrame: A Pandas DataFrame containing the data.
-            """
-            # Open the Parquet file
-            parquet_file = pq.ParquetFile(file_path)
-
-            # If nrows is not specified, read the entire file
-            if nrows is None:
-                return parquet_file.read().to_pandas()
-
-            # Read the first n rows
-            rows_read = 0
-            tables = []
-
-            # Iterate through row groups until we have enough rows
-            for i in range(parquet_file.num_row_groups):
-                table = parquet_file.read_row_groups(row_groups=[i], columns=None)
-                tables.append(table)
-                rows_read += table.num_rows
-                if rows_read >= nrows:
-                    break
-
-            # Combine tables and select the first nrows rows
-            combined_table = pa.Table.from_batches([batch for table in tables for batch in table.to_batches()])
-            df = combined_table.to_pandas().head(nrows)
-            return df
-
-        if file_path.suffix.lower()=='.parquet':
-            return 'parquet', read_parquet
-        elif file_path.suffix.lower() in ['.csv', '.txt']:
-            return 'csv', pd.read_csv
-        else:
-            raise ValueError(f"Unsupported file type: {file_path.suffix}")
-
     def load_data(
             self,
             file_path: Union[str, Path],
@@ -212,7 +156,7 @@ class PostgresDataLoader(BaseDataLoader):
         chunk_statuses: List[Dict] = []
 
         # Determine file type and get appropriate reader
-        file_type, reader_func = self._get_file_type_and_reader(file_path)
+        file_type, reader_func = FileUtils.get_file_type_and_reader(file_path)
         self._logger.info(f"Processing {file_type} file: {file_path}")
 
         # Create staging table
