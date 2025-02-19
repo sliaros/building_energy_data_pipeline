@@ -8,7 +8,7 @@ import pandas as pd
 from tqdm import tqdm
 import tempfile
 import os
-from typing import Optional, Dict, Union, List, Tuple, Any
+from typing import Optional, Dict, Union, List, Any
 from pathlib import Path
 import shutil
 import csv
@@ -494,14 +494,14 @@ class PostgresDataLoader(BaseDataLoader):
 
         @backoff.on_exception(
             backoff.expo,
-            (psycopg2.OperationalError, psycopg2.InterfaceError),
+            (psycopg2.OperationalError, psycopg2.InterfaceErro),
             max_tries=self._max_retries,
             on_backoff=lambda details: self._logger.warning(
                 f"Chunk {chunk_index} load attempt {details['tries']} failed. "
                 f"Retrying in {details['wait']:.2f}s..."
             ),
         )
-        def _process_chunk():
+        def _process_chunk(df: pd.DataFrame):  # Accept df as an argument
             start_time = time.time()
 
             # Integer columns that need special handling
@@ -555,7 +555,7 @@ class PostgresDataLoader(BaseDataLoader):
             return {'duration': duration}
 
         try:
-            return _process_chunk()
+            return _process_chunk(df)  # Pass df as an argument
         except Exception as e:
             self._logger.error(
                 f"Chunk {chunk_index} load failed after {self._max_retries} attempts. "
