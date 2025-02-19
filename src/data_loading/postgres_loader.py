@@ -19,6 +19,7 @@ from logs.logging_config import setup_logging
 import logging
 from src.postgres_managing.postgres_manager import PostgresManager, DatabaseConfig
 from abc import ABC, abstractmethod
+import backoff
 
 class BaseDataLoader(ABC):
     """
@@ -460,7 +461,7 @@ class PostgresDataLoader(BaseDataLoader):
             df: pd.DataFrame,
             staging_table: str,
             chunk_index: int
-    ) -> Dict[str, float]|None:
+    ) -> Dict[str, float] | None:
         """Process a single chunk with retries using COPY command."""
 
         # Convert numeric columns with proper integer handling
@@ -485,92 +486,82 @@ class PostgresDataLoader(BaseDataLoader):
                 pd.DataFrame: The modified DataFrame.
             """
             existing_columns = [col for col in columns_list if col in df.columns]
-
-            # Apply function to the entire column (not element-wise)
             for column in existing_columns:
                 df[column] = func(df[column])  # Apply function to the full column
-            non_existing_columns = set(columns_list) - set(existing_columns)
-            # if non_existing_columns:
-            #     print(f"The following columns do not exist in the DataFrame: {non_existing_columns}")
-
             return df
 
         temp_file = os.path.join(self._temp_dir, f"chunk_{chunk_index}.csv")
 
-        for attempt in range(self._max_retries):
-            try:
-                start_time = time.time()
+        @backoff.on_exception(
+            backoff.expo,
+            (psycopg2.OperationalError, psycopg2.InterfaceError),
+            max_tries=self._max_retries,
+            on_backoff=lambda details: self._logger.warning(
+                f"Chunk {chunk_index} load attempt {details['tries']} failed. "
+                f"Retrying in {details['wait']:.2f}s..."
+            ),
+        )
+        def _process_chunk():
+            start_time = time.time()
 
-                # Integer columns that need special handling
-                integer_columns = ['site_id_kaggle', 'building_id_kaggle','sqft',
-                                   'yearbuilt', 'numberoffloors',
-                                   'occupants', 'precipDepth1HR', 'windDirection',
-                                   'cloudCoverage', 'windDirection','precipDepth6HR']
+            # Integer columns that need special handling
+            integer_columns = [
+                'site_id_kaggle', 'building_id_kaggle', 'sqft', 'yearbuilt', 'numberoffloors',
+                'occupants', 'precipDepth1HR', 'windDirection', 'cloudCoverage', 'precipDepth6HR'
+            ]
 
-                df = apply_to_columns(df, integer_columns, convert_to_numeric_int64)
+            # Apply numeric conversion to integer columns
+            df = apply_to_columns(df, integer_columns, convert_to_numeric_int64)
 
-                # for col in float_columns:
-                #     if col in df.columns:
-                #         df[col] = pd.to_numeric(df[col], errors="coerce")
+            # Write chunk to temporary CSV file
+            df.to_csv(
+                temp_file,
+                index=False,
+                header=False,
+                sep=',',
+                na_rep='',
+                quoting=csv.QUOTE_MINIMAL,  # Add quotes only when necessary
+                quotechar='"',  # Use double quotes for quoting
+                escapechar='\\',  # Use backslash as escape character
+                doublequote=True,  # Double up quote characters within fields
+                float_format='%.2f'  # Format float numbers with 2 decimal places
+            )
 
-                # Write chunk to temporary CSV file
-                df.to_csv(
-                    temp_file,
-                    index=False,
-                    header=False,
-                    sep=',',
-                    na_rep='',
-                    quoting=csv.QUOTE_MINIMAL,  # Add quotes only when necessary
-                    quotechar='"',  # Use double quotes for quoting
-                    escapechar='\\',  # Use backslash as escape character
-                    doublequote=True,  # Double up quote characters within fields
-                    float_format = '%.2f'  # Format float numbers with 2 decimal places
-                )
-
-                # Copy data using psycopg2 connection
-                with self._database_manager.connection_context() as conn:
-                    with conn.cursor() as cur:
-                        with open(temp_file, 'r') as f:
-                            cur.execute("SET synchronous_commit = OFF;")
-                            cur.copy_expert(
-                                f"""
-                                            COPY {staging_table} FROM STDIN WITH (
-                                                FORMAT CSV,
-                                                NULL '',
-                                                QUOTE '"',
-                                                ESCAPE '\\',
-                                                DELIMITER ','
-                                            )
-                                            """,
-                                f
+            # Copy data using psycopg2 connection
+            with self._database_manager.connection_context() as conn:
+                with conn.cursor() as cur:
+                    with open(temp_file, 'r') as f:
+                        cur.execute("SET synchronous_commit = OFF;")
+                        cur.copy_expert(
+                            f"""
+                            COPY {staging_table} FROM STDIN WITH (
+                                FORMAT CSV,
+                                NULL '',
+                                QUOTE '"',
+                                ESCAPE '\\',
+                                DELIMITER ','
                             )
-                            cur.execute("SET synchronous_commit = ON;")
-                        conn.commit()
+                            """,
+                            f
+                        )
+                        cur.execute("SET synchronous_commit = ON;")
+                    conn.commit()
 
-                duration = time.time() - start_time
+            duration = time.time() - start_time
 
-                # Cleanup temporary file
-                os.remove(temp_file)
+            # Cleanup temporary file
+            os.remove(temp_file)
 
-                return {'duration': duration}
+            return {'duration': duration}
 
-            except (SQLAlchemyError, psycopg2.Error) as e:
-                if os.path.exists(temp_file):
-                    os.remove(temp_file)
-
-                delay = self._retry_delay * (2 ** attempt)
-                if attempt < self._max_retries - 1:
-                    self._logger.warning(
-                        f"Chunk {chunk_index} load attempt {attempt + 1} failed. "
-                        f"Retrying in {delay:.2f} seconds. Error: {e}"
-                    )
-                    time.sleep(delay)
-                else:
-                    self._logger.error(
-                        f"Chunk {chunk_index} load failed after {self._max_retries} attempts. "
-                        f"Error: {e}"
-                    )
-                    raise
+        try:
+            return _process_chunk()
+        except Exception as e:
+            self._logger.error(
+                f"Chunk {chunk_index} load failed after {self._max_retries} attempts. "
+                f"Error: {e}"
+            )
+            raise
 
     def _ensure_unique_constraint(self, target_table: str, unique_columns: List[str]):
         """
