@@ -236,30 +236,9 @@ class PostgresDataLoader(BaseDataLoader):
         self._log_load_statistics(table_name, stats)
         return stats
 
-    def _get_connection(self):
-        """Get a connection from the pool instead of creating a new one."""
-        try:
-            _connection = self._pool.getconn()
-            if _connection.closed:
-                self._pool.putconn(_connection, close=True)  # Remove bad connection
-                _connection = self._pool.getconn()
-            self._logger.info(f"Total: {self._pool.maxconn}, In Use: {len(self._pool._used)}, Available: {len(self._pool._pool)}")
-            return _connection
-        except Exception as e:
-            self._logger.error(f"Failed to get a connection from the pool: {e}")
-            raise
-
-    def _release_connection(self, conn):
-        """Return the connection back to the pool."""
-        try:
-            if conn:
-                self._pool.putconn(conn)
-        except Exception as e:
-            self._logger.error(f"Failed to return connection to pool: {e}")
-
     def _create_staging_table(self, source_table: str, staging_table: str):
         """Create a staging table without indexes."""
-        conn = self._get_connection()
+        conn = self._database_manager.get_connection()
         try:
             with conn.cursor() as cur:
                 cur.execute(f"CREATE UNLOGGED TABLE {staging_table} (LIKE {source_table})")
@@ -267,7 +246,7 @@ class PostgresDataLoader(BaseDataLoader):
                 conn.commit()
                 self._logger.info(f"Created staging table: {staging_table}")
         finally:
-            self._release_connection(conn)
+            self._database_manager.release_connection(conn)
 
     def _check_data_overlap(self, df: pd.DataFrame, target_table: str) -> Dict[str, Any]:
         """
@@ -382,7 +361,7 @@ class PostgresDataLoader(BaseDataLoader):
             END as overlap_details
         """
 
-        conn = self._get_connection()
+        conn = self._database_manager.get_connection()
         try:
             with conn.cursor() as cur:
                 # Prepare query parameters
@@ -420,7 +399,7 @@ class PostgresDataLoader(BaseDataLoader):
                     'affected_entities': details['entities']
                 }
         finally:
-            self._release_connection(conn)
+            self._database_manager.release_connection(conn)
 
     def _check_metadata_overlap(self, df: pd.DataFrame) -> Dict[str, Any]:
         """Check for overlapping building metadata."""
@@ -449,7 +428,7 @@ class PostgresDataLoader(BaseDataLoader):
             END as existing_buildings
         """
 
-        conn = self._get_connection()
+        conn = self._database_manager.get_connection()
         try:
             with conn.cursor() as cur:
                 cur.execute(query, (buildings, buildings, buildings))
@@ -471,7 +450,7 @@ class PostgresDataLoader(BaseDataLoader):
                     'affected_entities': existing
                 }
         finally:
-            self._release_connection(conn)
+            self._database_manager.release_connection(conn)
 
     def _process_chunk_with_retry(
             self,
@@ -546,7 +525,7 @@ class PostgresDataLoader(BaseDataLoader):
                 )
 
                 # Copy data using psycopg2 connection
-                conn = self._get_connection()
+                conn = self._database_manager.get_connection()
                 try:
                     with conn.cursor() as cur:
                         with open(temp_file, 'r') as f:
@@ -566,7 +545,7 @@ class PostgresDataLoader(BaseDataLoader):
                             cur.execute("SET synchronous_commit = ON;")
                         conn.commit()
                 finally:
-                    self._release_connection(conn)
+                    self._database_manager.release_connection(conn)
 
                 duration = time.time() - start_time
 
@@ -635,7 +614,7 @@ class PostgresDataLoader(BaseDataLoader):
         """
         conn = None
         try:
-            conn = self._get_connection()
+            conn = self._database_manager.get_connection()
             conn.autocommit = False
 
             with conn.cursor() as cur:
@@ -713,7 +692,7 @@ class PostgresDataLoader(BaseDataLoader):
 
         finally:
             if conn:
-                self._release_connection(conn)
+                self._database_manager.release_connection(conn)
 
     def _get_table_columns(self, table_name: str) -> list:
         """
@@ -726,7 +705,7 @@ class PostgresDataLoader(BaseDataLoader):
         Returns:
             list: Ordered list of column names
         """
-        conn = self._get_connection()  # Get connection explicitly
+        conn = self._database_manager.get_connection()
         try:
             with conn.cursor() as cur:
                 cur.execute("""
@@ -737,18 +716,18 @@ class PostgresDataLoader(BaseDataLoader):
                     """, (table_name,))
                 return [row[0] for row in cur.fetchall()]
         finally:
-            self._release_connection(conn)  # FIX: Release connection
+            self._database_manager.release_connection(conn)
 
     def _cleanup_staging(self, staging_table: str):
         """Drop the staging table."""
-        conn = self._get_connection()
+        conn = self._database_manager.get_connection()
         try:
             with conn.cursor() as cur:
                 cur.execute(f"DROP TABLE IF EXISTS {staging_table}")
                 conn.commit()
             self._logger.info(f"Dropped staging table {staging_table}")
         finally:
-            self._release_connection(conn)
+            self._database_manager.release_connection(conn)
 
     def _process_chunk_result(self, chunk_info: Dict, result: Dict,
                               chunk_statuses: List, total_rows_loaded: int,
@@ -861,20 +840,6 @@ class PostgresDataLoader(BaseDataLoader):
     def _generate_schema(self):
         pass
 
-    def _table_exists(self, conn, table_name):
-        try:
-            with conn.cursor() as cur:
-                cur.execute("""
-                    SELECT EXISTS (
-                        SELECT 1
-                        FROM pg_tables
-                        WHERE tablename = %s
-                    );
-                """, (table_name,))
-                return cur.fetchone()[0]
-        finally:
-            self._release_connection(conn)
-
     def _create_table(self,
                       schema_file: Union[str, Path],
                       table_name: str,
@@ -893,7 +858,7 @@ class PostgresDataLoader(BaseDataLoader):
                 with open(schema_file, 'r') as f:
                     sql_schema = f.read()
                     with conn.cursor() as cur:
-                        if self._table_exists(conn, table_name):
+                        if self._database_manager.table_exists(table_name):
                             self._logger.info(f"Table {table_name} already exists in database {self._db_params['database']}")
                             if if_exists == 'replace':
                                 self._logger.info(f"Dropping table {table_name} from database {self._db_params['database']}")

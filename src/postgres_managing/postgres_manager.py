@@ -12,8 +12,7 @@ import threading
 import backoff
 import os
 from logs.logging_config import setup_logging
-from functools import lru_cache
-
+from functools import lru_cache, wraps
 
 @dataclass
 class DatabaseConfig:
@@ -30,11 +29,29 @@ class DatabaseConfig:
     query_timeout: int = 30000  # milliseconds
     enable_ssl: bool = True
     ssl_mode: str = "prefer"
+    work_mem: str = "16MB"
+    maintenance_work_mem: str = "128MB"
     replication_slot: Optional[str] = None
     standby_servers: List[str] = None
     postgresql_conf: Optional[str] = None
     pg_hba_conf: Optional[str] = None
 
+def configure_connection(func):
+    """Decorator to apply session-level settings to database connections."""
+    @wraps(func)
+    def wrapper(self, *args, **kwargs):
+        conn = func(self, *args, **kwargs)
+        try:
+            with conn.cursor() as cur:
+                cur.execute(f"SET work_mem = '{self.config.work_mem}'")
+                cur.execute(f"SET maintenance_work_mem = '{self.config.maintenance_work_mem}'")
+                cur.execute("SET client_encoding = 'UTF8'")
+            return conn
+        except Exception as e:
+            self._logger.error(f"Failed to configure connection: {e}")
+            conn.close()
+            raise
+    return wrapper
 
 class PostgresManager:
     def __init__(self, config: DatabaseConfig):
@@ -51,34 +68,70 @@ class PostgresManager:
         self.query_history = []
         self.max_query_history = 1000
 
-    @backoff.on_exception(backoff.expo,
+    @backoff.on_exception(
+        backoff.expo,
         (psycopg2.OperationalError, psycopg2.InterfaceError),
-        max_tries=5)
-    def _create_connection(self) -> psycopg2.extensions.connection:
-        """Create a new database connection with retry mechanism."""
+        max_tries=5,
+        on_backoff=lambda details: logging.warning(
+            f"Retrying database connection pool initialization (attempt {details['tries']} after {details['wait']:.2f}s)..."
+        ),
+    )
+    def _initialize_connection_pool(self) -> None:
+        """Initialize the PostgreSQL connection pool."""
+        self._pool = psycopg2.pool.SimpleConnectionPool(
+            minconn=self.config.min_connections,
+            maxconn=self.config.max_connections,
+            host=self.config.host,
+            port=self.config.port,
+            database=self.config.database,
+            user=self.config.user,
+            password=self.config.password,
+            sslmode=self.config.ssl_mode if self.config.enable_ssl else 'disable'
+        )
+
+    @configure_connection
+    @backoff.on_exception(
+        backoff.expo,
+        (psycopg2.OperationalError, psycopg2.InterfaceError),
+        max_tries=5,
+        on_backoff=lambda details: logging.warning(
+            f"Retrying database connection retrieval (attempt {details['tries']} after {details['wait']:.2f}s)..."
+        ),
+    )
+    def get_connection(self):
+        """Get a connection from the pool instead of creating a new one."""
         try:
-            conn = psycopg2.connect(
-                host=self.config.host,
-                port=self.config.port,
-                database=self.config.database,
-                user=self.config.user,
-                password=self.config.password,
-                application_name=self.config.application_name,
-                connect_timeout=self.config.connection_timeout,
-                sslmode=self.config.ssl_mode if self.config.enable_ssl else 'disable',
-                options=f'-c statement_timeout={self.config.query_timeout}'
-            )
-
-            # Configure connection
-            with conn.cursor() as cur:
-                cur.execute("SET work_mem = '64MB'")
-                cur.execute("SET maintenance_work_mem = '256MB'")
-                cur.execute("SET client_encoding = 'UTF8'")
-
-            return conn
+            _connection = self._pool.getconn()
+            if _connection.closed:
+                self._pool.putconn(_connection, close=True)  # Remove bad connection
+                _connection = self._pool.getconn()
+            self._logger.info(f"Total: {self._pool.maxconn}, In Use: {len(self._pool._used)}, Available: {len(self._pool._pool)}")
+            return _connection
         except Exception as e:
-            self._logger.error(f"Connection creation failed: {str(e)}")
+            self._logger.error(f"Failed to get a connection from the pool: {e}")
             raise
+
+    def release_connection(self, conn):
+        """Return the connection back to the pool."""
+        try:
+            if conn:
+                self._pool.putconn(conn)
+        except Exception as e:
+            self._logger.error(f"Failed to return connection to pool: {e}")
+
+    @contextmanager
+    def connection_context(self):
+        """Provide a transactional connection context."""
+        conn = self.get_connection()
+        try:
+            yield conn
+        finally:
+            self.release_connection(conn)
+
+    def close_all_connections(self):
+        """Close all connections in the pool."""
+        if self._pool:
+            self._pool.closeall()
 
     def verify_connection(self) -> bool:
         """
@@ -146,50 +199,21 @@ class PostgresManager:
             self._logger.error(f"Database creation failed: {str(e)}")
             return False
 
-    def _initialize_connection_pool(self) -> None:
-        """Initialize the connection pool with minimum connections."""
-        for _ in range(self.config.min_connections):
-            conn = self._create_connection()
-            self._connection_pool.append(conn)
-
-    @contextmanager
-    def get_connection(self):
-        """Get a connection from the pool with context management."""
-        conn = None
-        try:
-            with self._pool_lock:
-                if self._connection_pool:
-                    conn = self._connection_pool.pop()
-                else:
-                    conn = self._create_connection()
-            yield conn
-        finally:
-            if conn:
-                try:
-                    if not conn.closed:
-                        conn.rollback()
-                        with self._pool_lock:
-                            self._connection_pool.append(conn)
-                except Exception:
-                    self._safe_close(conn)
-
     # Query Management Methods
-    def execute_query(self, query: str, params: Optional[tuple] = None,
-                      fetch_all: bool = True) -> Union[List[Dict], Dict, None]:
+    def execute_query(self, query: str, params: Optional[tuple] = None, fetch_all: bool = True) -> Union[
+        List[Dict], Dict, None]:
         """Execute a query with proper error handling and logging."""
         start_time = datetime.now()
         try:
-            with self.get_connection() as conn:
+            with self.connection_context() as conn:
                 with conn.cursor(cursor_factory=DictCursor) as cur:
                     cur.execute(query, params)
-
                     if cur.description:  # Select query
                         result = cur.fetchall() if fetch_all else cur.fetchone()
                         result = [dict(row) for row in result] if fetch_all else dict(result)
                     else:  # DML query
                         result = cur.rowcount
                         conn.commit()
-
                     execution_time = (datetime.now() - start_time).total_seconds()
                     self._log_query(query, params, execution_time)
                     return result
@@ -210,6 +234,18 @@ class PostgresManager:
             self.query_history.pop(0)
 
     # Table Management Methods
+    def table_exists(self, table_name: str) -> bool:
+        """Check if a table exists in the database using execute_query."""
+        query = """
+            SELECT EXISTS (
+                SELECT 1
+                FROM pg_tables
+                WHERE tablename = %s
+            );
+        """
+        result = self.execute_query(query, (table_name,), fetch_all=False)
+        return result["exists"] if result else False
+
     def create_table(self, table_name: str, columns: List[Dict[str, str]],
                      primary_key: Optional[str] = None) -> bool:
         """Create a new table with specified columns and constraints."""
