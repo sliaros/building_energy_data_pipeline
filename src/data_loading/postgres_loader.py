@@ -249,13 +249,17 @@ class PostgresDataLoader(BaseDataLoader):
         return stats
 
     def _create_staging_table(self, source_table: str, staging_table: str):
-        """Create a staging table without indexes."""
-        with self._database_manager.connection_context() as conn:
-            with conn.cursor() as cur:
-                cur.execute(f"CREATE UNLOGGED TABLE {staging_table} (LIKE {source_table})")
-                cur.execute(f"ALTER TABLE {staging_table} SET unlogged")
-                conn.commit()
-                self._logger.info(f"Created staging table: {staging_table}")
+        """Create a staging table without indexes using a single transaction."""
+        query = f"""
+            CREATE UNLOGGED TABLE {staging_table} (LIKE {source_table});
+            ALTER TABLE {staging_table} SET UNLOGGED;
+        """
+        try:
+            self._database_manager.execute_query(query, fetch_all=False)
+            self._logger.info(f"Created staging table: {staging_table}")
+        except Exception as e:
+            self._logger.error(f"Failed to create staging table {staging_table}: {e}")
+            raise
 
     def _check_data_overlap(self, df: pd.DataFrame, target_table: str) -> Dict[str, Any]:
         """
