@@ -1,7 +1,6 @@
 import psycopg2
 from psycopg2 import pool
 from sqlalchemy import create_engine
-from sqlalchemy.engine.url import URL
 from sqlalchemy.exc import SQLAlchemyError
 from concurrent.futures import ThreadPoolExecutor
 import time
@@ -93,10 +92,10 @@ class PostgresDataLoader(BaseDataLoader):
             if not self._database_manager.verify_connection():
                 raise Exception(f"Failed to connect to or create database {self._db_config.database}")
 
-            self._sqlalchemy_url = self._postgres_params_to_sqlalchemy_url()
+            self._sqlalchemy_url = self._database_manager.postgres_params_to_sqlalchemy_url()
 
             self._engine = create_engine(
-                self._postgres_params_to_sqlalchemy_url(),
+                self._database_manager.postgres_params_to_sqlalchemy_url(),
                 pool_size=max_workers,
                 max_overflow=2
             )
@@ -844,53 +843,12 @@ class PostgresDataLoader(BaseDataLoader):
                     )
                     raise
 
-    def _postgres_params_to_sqlalchemy_url(self) -> URL:
-        """
-        Convert PostgreSQL parameters to SQLAlchemy URL.
-
-        Returns:
-            SQLAlchemy connection URL
-        """
-        return URL.create(
-            drivername="postgresql+psycopg2",
-            username=self._db_params["user"],
-            password=self._db_params["password"],
-            host=self._db_params["host"],
-            port=self._db_params["port"],
-            database=self._db_params["database"]
-        )
-
-    def _create_table(self,
+    def create_table(self,
                       schema_file: Union[str, Path],
                       table_name: str,
                       if_exists: str = 'fail') -> None:
         """Create a table based on the provided schema file and database connection parameters."""
-        assert if_exists in ['fail', 'replace']
-
-        try:
-            schema_file = Path(schema_file)
-            if not schema_file.exists():
-                raise FileNotFoundError(f"Schema file not found: {schema_file}")
-
-            self._logger.info(f"Creating table {table_name} in database {self._db_params['database']}")
-
-            with psycopg2.connect(**self._db_params) as conn:
-                with open(schema_file, 'r') as f:
-                    sql_schema = f.read()
-                    with conn.cursor() as cur:
-                        if self._database_manager.table_exists(table_name):
-                            self._logger.info(f"Table {table_name} already exists in database {self._db_params['database']}")
-                            if if_exists == 'replace':
-                                self._logger.info(f"Dropping table {table_name} from database {self._db_params['database']}")
-                                cur.execute(f"DROP TABLE IF EXISTS {table_name}")
-                            else:
-                                self._logger.info(f"Aborting creation of table {table_name} in database {self._db_params['database']}")
-                                return
-                        cur.execute(sql_schema)
-                        self._logger.info(f"Successfully created table {table_name} in database {self._db_params['database']}")
-        except Exception as e:
-            self._logger.error(f"Failed to create table: {str(e)}")
-            raise
+        self._database_manager.create_table_from_schema(schema_file, table_name, if_exists)
 
     def _log_load_statistics(
             self,

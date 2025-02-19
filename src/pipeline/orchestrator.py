@@ -104,7 +104,7 @@ class Orchestrator:
 
                 _table_name, _scema_file = _result['table_name'], _result['schema_file_path']
 
-                loader._create_table(_scema_file,
+                loader.create_table(_scema_file,
                     _table_name,
                 if_exists='fail')
 

@@ -13,6 +13,8 @@ import backoff
 import os
 from logs.logging_config import setup_logging
 from functools import lru_cache, wraps
+from pathlib import Path
+from sqlalchemy.engine.url import URL
 
 @dataclass
 class DatabaseConfig:
@@ -199,6 +201,22 @@ class PostgresManager:
             self._logger.error(f"Database creation failed: {str(e)}")
             return False
 
+    def postgres_params_to_sqlalchemy_url(self) -> URL:
+        """
+        Convert PostgreSQL parameters to SQLAlchemy URL.
+
+        Returns:
+            SQLAlchemy connection URL
+        """
+        return URL.create(
+            drivername="postgresql+psycopg2",
+            username=self.config.user,
+            password=self.config.password,
+            host=self.config.host,
+            port=self.config.port,
+            database=self.config.database
+        )
+
     # Query Management Methods
     def execute_query(self, query: str, params: Optional[tuple] = None, fetch_all: bool = True) -> Union[
         List[Dict], Dict, None]:
@@ -246,7 +264,7 @@ class PostgresManager:
         result = self.execute_query(query, (table_name,), fetch_all=False)
         return result["exists"] if result else False
 
-    def create_table(self, table_name: str, columns: List[Dict[str, str]],
+    def create_table_from_definition(self, table_name: str, columns: List[Dict[str, str]],
                      primary_key: Optional[str] = None) -> bool:
         """Create a new table with specified columns and constraints."""
         column_definitions = []
@@ -270,6 +288,37 @@ class PostgresManager:
         try:
             self.execute_query(create_query)
             self._logger.info(f"Table {table_name} created successfully")
+            return True
+        except Exception as e:
+            self._logger.error(f"Failed to create table {table_name}: {str(e)}")
+            return False
+
+    def create_table_from_schema(self,
+                      schema_file: Union[str, Path],
+                      table_name: str,
+                      if_exists: str = 'fail') -> None:
+        """Create a table based on the provided schema file and database connection parameters."""
+        assert if_exists in ['fail', 'replace']
+
+        try:
+            if schema_file:
+                schema_file = Path(schema_file)
+                if not schema_file.exists():
+                    raise FileNotFoundError(f"Schema file not found: {schema_file}")
+                with open(schema_file, 'r') as f:
+                    sql_schema = f.read()
+
+            if self.table_exists(table_name):
+                if if_exists=='replace':
+                    self._logger.info(f"Table {table_name} already exists in database")
+                    self._logger.info(f"Dropping table {table_name}")
+                    self.drop_table(table_name)
+                else:
+                    self._logger.info(f"Aborting creation of table {table_name}")
+                    return
+
+            self.execute_query(sql_schema)
+            self._logger.info(f"Successfully created table {table_name} in database")
             return True
         except Exception as e:
             self._logger.error(f"Failed to create table {table_name}: {str(e)}")

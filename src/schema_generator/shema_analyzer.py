@@ -142,21 +142,33 @@ class SQLSchemaGenerator:
 
         return '\n'.join(sql_parts)
 
-    def _generate_column_definitions(self, columns: List[BaseColumnInfo]) -> List[str]:
-        """Generate SQL column definitions.
+    def _generate_column_definitions(
+            self,
+            columns: List[BaseColumnInfo],
+            primary_key: Optional[str] = None
+    ) -> List[str]:
+        """Generate SQL column definitions with optional primary key constraint.
 
         Args:
             columns: List of column information objects
+            primary_key: Optional column name to use as primary key
 
         Returns:
             List of formatted column definition strings
         """
         definitions = []
+
+        # Generate individual column definitions
         for column in columns:
             definition = f'    "{column.name}" {column.data_type}'
             if not column.nullable:
                 definition += " NOT NULL"
             definitions.append(definition)
+
+        # Add primary key constraint as a separate definition if provided
+        if primary_key:
+            definitions.append(f"    PRIMARY KEY ({primary_key})")
+
         return definitions
 
     @staticmethod
