@@ -124,6 +124,7 @@ class PostgresManager:
 
     @contextmanager
     def connection_context(self):
+
             conn = self.get_connection()
             self._logger.debug(f"Acquired connection: {conn}")
             try:
