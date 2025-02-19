@@ -751,8 +751,8 @@ class PostgresDataLoader(BaseDataLoader):
     @backoff.on_exception(
         backoff.expo,
         (psycopg2.OperationalError, psycopg2.InterfaceError),
-        max_tries=self._max_retries,
-        on_backoff=lambda details: self._logger.warning(
+        max_tries=super()._max_retries,
+        on_backoff=lambda details: super()._logger.warning(
             f"Chunk load attempt {details['tries']} failed. "
             f"Retrying in {details['wait']:.2f}s..."
         ),
