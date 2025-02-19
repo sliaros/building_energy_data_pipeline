@@ -604,79 +604,69 @@ class PostgresDataLoader(BaseDataLoader):
             target_table (str): Name of the target table for the merge
             batch_size (int): Number of rows to process in each batch
         """
-        with self._database_manager.connection_context() as conn:
-                with conn.cursor() as cur:
-                    try:
-                        # Get an estimated row count from PostgreSQL statistics
-                        # This is much faster than COUNT(*) for large tables
-                        cur.execute(f"""
-                            SELECT reltuples::bigint AS estimate
-                            FROM pg_class
-                            WHERE relname = %s
-                        """, (staging_table,))
-                        estimated_rows = cur.fetchone()[0]
+        try:
+            # Get an estimated row count from PostgreSQL statistics
+            # This is much faster than COUNT(*) for large tables
+            query = """
+                SELECT reltuples::bigint AS estimate
+                FROM pg_class
+                WHERE relname = %s
+            """
+            result = self._database_manager.execute_query(query, params=(staging_table,), fetch_all=False)
+            estimated_rows = result['estimate']
 
-                        self._logger.info(f"Processing approximately {estimated_rows:,} rows from {staging_table}")
+            self._logger.info(f"Processing approximately {estimated_rows:,} rows from {staging_table}")
 
-                        if estimated_rows==0:
-                            self._logger.info("No rows to merge. Skipping process.")
-                            return
+            if estimated_rows==0:
+                self._logger.info("No rows to merge. Skipping process.")
+                return
 
-                        # Get column information for the insert statement
-                        columns = self._get_table_columns(staging_table)
-                        placeholders = ','.join(['%s'] * len(columns))
+            # Get column information for the insert statement
+            columns = self._get_table_columns(staging_table)
 
-                        # Prepare the optimized insert statement
-                        insert_stmt = f"""
-                            INSERT INTO {target_table} ({','.join(columns)})
-                            SELECT *
-                            FROM {staging_table}
-                            OFFSET %s
-                            LIMIT %s
-                        """
+            # Process data in optimized batches
+            offset = 0
+            total_processed = 0
 
-                        # Process data in optimized batches
-                        offset = 0
-                        total_processed = 0
+            with tqdm(total=estimated_rows, desc="Merging Rows", unit="rows") as pbar:
+                while True:
+                    # Use a single query for the batch insert
+                    # This is more efficient than fetching and then inserting
+                    with self._database_manager.connection_context() as conn:
+                        with conn.cursor() as cur:
+                            cur.execute(f"""
+                                WITH batch AS (
+                                    SELECT *
+                                    FROM {staging_table}
+                                    OFFSET {offset}
+                                    LIMIT {batch_size}
+                                )
+                                INSERT INTO {target_table}
+                                SELECT * FROM batch
+                                RETURNING 1
+                            """)
 
-                        with tqdm(total=estimated_rows, desc="Merging Rows", unit="rows") as pbar:
-                            while True:
-                                # Use a single query for the batch insert
-                                # This is more efficient than fetching and then inserting
-                                cur.execute(f"""
-                                    WITH batch AS (
-                                        SELECT *
-                                        FROM {staging_table}
-                                        OFFSET {offset}
-                                        LIMIT {batch_size}
-                                    )
-                                    INSERT INTO {target_table}
-                                    SELECT * FROM batch
-                                    RETURNING 1
-                                """)
+                            # Get the actual number of rows inserted
+                            inserted_rows = cur.rowcount
 
-                                # Get the actual number of rows inserted
-                                inserted_rows = cur.rowcount
+                            if inserted_rows==0:
+                                break
 
-                                if inserted_rows==0:
-                                    break
+                            conn.commit()  # Commit after each batch
 
-                                conn.commit()  # Commit after each batch
+                            total_processed += inserted_rows
+                            offset += batch_size
+                            pbar.update(inserted_rows)
 
-                                total_processed += inserted_rows
-                                offset += batch_size
-                                pbar.update(inserted_rows)
+                            # Log progress periodically
+                            if total_processed % 100000==0:
+                                tqdm.write(f"Processed {total_processed:,} rows so far")
 
-                                # Log progress periodically
-                                if total_processed % 100000==0:
-                                    tqdm.write(f"Processed {total_processed:,} rows so far")
+            self._logger.info(f"Successfully merged {total_processed:,} rows into {target_table}")
 
-                        self._logger.info(f"Successfully merged {total_processed:,} rows into {target_table}")
-
-                    except Exception as cur_error:
-                        self._logger.error(f"Cursor operation failed: {cur_error}")
-                        conn.rollback()
-                        raise
+        except Exception as e:
+            self._logger.error(f"Failed to merge data from {staging_table} to {target_table}: {e}")
+            raise
 
     def _get_table_columns(self, table_name: str) -> list:
         """
