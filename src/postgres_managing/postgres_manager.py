@@ -142,7 +142,7 @@ class PostgresManager:
         """
         try:
             # Try to create a connection using the established connection method
-            with self._create_connection() as conn:
+            with self.connection_context() as conn:
                 self._logger.info("Successfully connected to database")
                 return True
         except psycopg2.OperationalError as e:

@@ -103,9 +103,14 @@ class PostgreSQLSchemaAnalyzer(BaseSchemaAnalyzer):
 
 
 class SQLSchemaGenerator:
-    """Generates SQL schema definitions from analyzed column information"""
+    """Generates SQL schema definitions from analyzed column information."""
 
     def __init__(self, table_name: Optional[str] = None):
+        """Initialize the SQL schema generator.
+
+        Args:
+            table_name: Optional name for the table. If not provided, will be derived from the source file.
+        """
         self.table_name = table_name
 
     def generate_schema(
@@ -113,44 +118,73 @@ class SQLSchemaGenerator:
             columns: List[BaseColumnInfo],
             source_file: Union[str, Path]
     ) -> str:
-        """Generate SQL schema definition"""
-        source_file = Path(source_file)
-        table_name = self.table_name or self._derive_table_name(source_file)
+        """Generate SQL schema definition.
+
+        Args:
+            columns: List of column information objects
+            source_file: Path to the source data file
+
+        Returns:
+            Complete SQL schema as a string
+        """
+        source_file_path = Path(source_file)
+        table_name = self.table_name or self._derive_table_name(source_file_path)
 
         sql_parts = []
-
-        # Add header
-        sql_parts.extend(self._generate_header(source_file, len(columns)))
-
-        # Generate table definition
+        sql_parts.extend(self._generate_header(source_file_path, len(columns)))
         sql_parts.append(f'CREATE TABLE IF NOT EXISTS "{table_name}" (')
 
-        # Add columns
-        column_defs = []
-        for col in columns:
-            definition = f'    "{col.name}" {col.data_type}'
-            if not col.nullable:
-                definition += " NOT NULL"
-            column_defs.append(definition)
-
-        sql_parts.append(',\n'.join(column_defs))
+        column_definitions = self._generate_column_definitions(columns)
+        sql_parts.append(',\n'.join(column_definitions))
         sql_parts.append(');')
 
-        # Add footer with metadata
         sql_parts.extend(self._generate_footer(columns))
 
         return '\n'.join(sql_parts)
 
+    def _generate_column_definitions(self, columns: List[BaseColumnInfo]) -> List[str]:
+        """Generate SQL column definitions.
+
+        Args:
+            columns: List of column information objects
+
+        Returns:
+            List of formatted column definition strings
+        """
+        definitions = []
+        for column in columns:
+            definition = f'    "{column.name}" {column.data_type}'
+            if not column.nullable:
+                definition += " NOT NULL"
+            definitions.append(definition)
+        return definitions
+
     @staticmethod
     def _derive_table_name(file_path: Path) -> str:
-        """Derive table name from file path"""
+        """Derive table name from file path.
+
+        Args:
+            file_path: Path object for the source file
+
+        Returns:
+            Derived table name as string
+        """
         import re
         base_name = file_path.stem.lower()
         clean_name = re.sub(r'[^a-zA-Z0-9_]', '_', base_name)
         return f"tbl_{clean_name}" if clean_name[0].isdigit() else clean_name
 
-    def _generate_header(self, source_file: Path, column_count: int) -> List[str]:
-        """Generate SQL header comments"""
+    @staticmethod
+    def _generate_header(source_file: Path, column_count: int) -> List[str]:
+        """Generate SQL header comments.
+
+        Args:
+            source_file: Path object for the source file
+            column_count: Number of columns in the schema
+
+        Returns:
+            List of header comment strings
+        """
         return [
             f"-- Schema generated for {source_file.name}",
             f"-- Generated on {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
@@ -159,25 +193,33 @@ class SQLSchemaGenerator:
             "-- Table Definition"
         ]
 
-    def _generate_footer(self, columns: List[BaseColumnInfo]) -> List[str]:
-        """Generate footer with additional information"""
+    @staticmethod
+    def _generate_footer(columns: List[BaseColumnInfo]) -> List[str]:
+        """Generate footer with additional column information.
+
+        Args:
+            columns: List of column information objects
+
+        Returns:
+            List of footer comment strings
+        """
         footer = [
             "",
             "-- Column Information:"
         ]
 
-        for col in columns:
+        for column in columns:
             footer.extend([
-                f"-- {col.name}:",
-                f"--   Type: {col.original_type} -> {col.data_type}",
-                f"--   Nullable: {col.nullable}",
-                f"--   Unique Values: {col.stats['unique_count']}",
+                f"-- {column.name}:",
+                f"--   Type: {column.original_type} -> {column.data_type}",
+                f"--   Nullable: {column.nullable}",
+                f"--   Unique Values: {column.stats['unique_count']}",
                 "--   Recommendations:"
             ])
 
-            if col.metadata and col.metadata.get('recommendations'):
-                for rec in col.metadata['recommendations']:
-                    footer.append(f"--     * {rec}")
+            if column.metadata and column.metadata.get('recommendations'):
+                for recommendation in column.metadata['recommendations']:
+                    footer.append(f"--     * {recommendation}")
 
             footer.append("--")
 

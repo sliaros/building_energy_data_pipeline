@@ -24,26 +24,3 @@ class BaseDataLoader(ABC):
             chunk_size: Number of rows to process in each batch
         """
         pass
-
-    @abstractmethod
-    def _verify_connection(self) -> bool:
-        """
-        Verify database connection.
-
-        Returns:
-            bool: Connection status
-        """
-        pass
-
-    @abstractmethod
-    def _generate_schema(self, file_path: Union[str, Path, None]) -> Optional[Dict[str, Union[str, Path]]]:
-        """
-        Generate database schema from a data file.
-
-        Args:
-            file_path: Path to the source data file
-
-        Returns:
-            Dict containing schema generation details or None
-        """
-        pass

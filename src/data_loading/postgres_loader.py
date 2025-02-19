@@ -12,7 +12,6 @@ import tempfile
 import os
 from typing import Optional, Dict, Union, List, Tuple, Any
 from pathlib import Path
-from .base_loader import BaseDataLoader
 import shutil
 import csv
 from src.schema_generator.sampling_strategies import BaseSamplingStrategy, RandomSamplingStrategy
@@ -22,6 +21,30 @@ from logs.logging_config import setup_logging
 import logging
 from src.postgres_managing.postgres_manager import PostgresManager, DatabaseConfig
 import threading
+from abc import ABC, abstractmethod
+
+class BaseDataLoader(ABC):
+    """
+    Abstract base class for data loading strategies.
+    Defines the common interface for different data loading implementations.
+    """
+
+    @abstractmethod
+    def load_data(
+            self,
+            file_path: Union[str, Path],
+            table_name: str,
+            chunk_size: int = 100000
+    ) -> None:
+        """
+        Abstract method to load data from a file into a database.
+
+        Args:
+            file_path: Path to the source data file
+            table_name: Name of the target database table
+            chunk_size: Number of rows to process in each batch
+        """
+        pass
 
 class PostgresDataLoader(BaseDataLoader):
     """
@@ -836,9 +859,6 @@ class PostgresDataLoader(BaseDataLoader):
             port=self._db_params["port"],
             database=self._db_params["database"]
         )
-
-    def _generate_schema(self):
-        pass
 
     def _create_table(self,
                       schema_file: Union[str, Path],
