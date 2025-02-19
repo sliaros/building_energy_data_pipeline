@@ -19,7 +19,6 @@ from src.utility.file_utils import FileUtils
 from logs.logging_config import setup_logging
 import logging
 from src.postgres_managing.postgres_manager import PostgresManager, DatabaseConfig
-import threading
 from abc import ABC, abstractmethod
 
 class BaseDataLoader(ABC):
@@ -86,9 +85,6 @@ class PostgresDataLoader(BaseDataLoader):
 
             self._database_manager = PostgresManager(self._db_config)
 
-            self._connection_pool = []
-            self._pool_lock = threading.Lock()
-
             if not self._database_manager.verify_connection():
                 raise Exception(f"Failed to connect to or create database {self._db_config.database}")
 
@@ -100,11 +96,6 @@ class PostgresDataLoader(BaseDataLoader):
                 max_overflow=2
             )
 
-            self._pool = pool.SimpleConnectionPool(
-                minconn=1,
-                maxconn=self._max_workers + 2,
-                **self._db_params
-            )
             self._logger.info(f"Created connection pool with max {max_workers + 2} connections.")
 
             # Create temp directory for chunk files
@@ -121,8 +112,8 @@ class PostgresDataLoader(BaseDataLoader):
                     self._logger.info(f"Cleaned up temporary directory {self._temp_dir}")
 
                     # **Close the connection pool**
-                if hasattr(self, '_pool'):
-                    self._pool.closeall()
+                if hasattr(self, '_database_manager'):
+                    self._database_manager.close_all_connections()
                     self._logger.info("Closed all connections in the pool.")
             except Exception as e:
                 self._logger.error(f"Cleanup failed: {e}")
