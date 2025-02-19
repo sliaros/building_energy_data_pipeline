@@ -263,34 +263,16 @@ class PostgresDataLoader(BaseDataLoader):
 
     def _check_data_overlap(self, df: pd.DataFrame, target_table: str) -> Dict[str, Any]:
         """
-        Quick check for overlapping time series data before upload.
+        Checks for overlapping time series data before upload.
         Returns detailed information about any overlaps found.
-
-        Args:
-            file_path: Path to the data file
-            target_table: Name of the target table ('raw', 'weather', or 'metadata')
-
-        Returns:
-            Dict with overlap information:
-            {
-                'has_overlap': bool,
-                'overlap_details': str,
-                'overlap_range': Tuple[datetime, datetime] or None,
-                'affected_entities': List[str]  # buildings/sites affected
-            }
         """
-        # Load just enough rows to determine key entities and time range if applicable
-
-        if target_table=='raw':
-            return self._check_existing_data(df, 'raw')
-        elif target_table=='weather':
-            return self._check_existing_data(df, 'weather')
-        elif target_table=='metadata':
-            return self._check_existing_data(df, 'metadata')
-        else:
+        if target_table not in ('raw', 'weather', 'metadata'):
             raise ValueError(f"Unsupported table for overlap check: {target_table}")
 
-    def _check_existing_data(self, df: pd.DataFrame, target_table: str) -> Dict[str, Any]|None:
+        return self._check_existing_data(df, target_table)
+
+
+    def _check_existing_data(self, df: pd.DataFrame, target_table: str) -> Dict[str, Any]:
         """
         Common function to check for overlaps across all table types.
         Handles both time series data (raw, weather) and metadata.
@@ -298,118 +280,83 @@ class PostgresDataLoader(BaseDataLoader):
         if target_table=='metadata':
             return self._check_metadata_overlap(df)
 
-        # For time series data (raw and weather)
         try:
-            min_time = pd.to_datetime(df['timestamp'].min())
-            max_time = pd.to_datetime(df['timestamp'].max())
+            min_time, max_time = pd.to_datetime(df['timestamp'].min()), pd.to_datetime(df['timestamp'].max())
 
-            # Get entity IDs based on table type
             if target_table=='raw':
-                entities = list(df['building_id'].unique())  # Changed to list
-                meters = list(df['meter'].unique())  # Changed to list
-                entity_column = 'building_id'
-                additional_conditions = 'AND r.meter = ANY(%s::varchar[])'
-                table_alias = 'r'
+                entities, meters = list(df['building_id'].unique()), list(df['meter'].unique())
+                entity_column, additional_conditions, table_alias = 'building_id', 'AND r.meter = ANY(%s::varchar[])', 'r'
             else:  # weather
-                entities = list(df['site_id'].unique())  # Changed to list
-                entity_column = 'site_id'
-                additional_conditions = ''
-                table_alias = 'w'
-                meters = None
+                entities, meters = list(df['site_id'].unique()), None
+                entity_column, additional_conditions, table_alias = 'site_id', '', 'w'
 
         except KeyError as e:
             raise ValueError(f"Missing required column: {e}")
 
         query = f"""
-        WITH file_bounds AS (
             SELECT 
-                %s::timestamp as min_time,
-                %s::timestamp as max_time
-        )
-        SELECT 
-            EXISTS(
-                SELECT 1 
-                FROM {target_table} {table_alias}, file_bounds fb
-                WHERE {table_alias}.{entity_column} = ANY(%s::varchar[])
-                {additional_conditions}
-                AND {table_alias}.timestamp::timestamp BETWEEN fb.min_time - interval '1 hour' 
-                    AND fb.max_time + interval '1 hour'
-            ) as has_overlap,
-            CASE WHEN EXISTS(
-                SELECT 1 
-                FROM {target_table} {table_alias}, file_bounds fb
-                WHERE {table_alias}.{entity_column} = ANY(%s::varchar[])
-                {additional_conditions}
-                AND {table_alias}.timestamp::timestamp BETWEEN fb.min_time - interval '1 hour' 
-                    AND fb.max_time + interval '1 hour'
-            ) THEN
-                json_build_object(
-                    'start_time', (
-                        SELECT MIN({table_alias}.timestamp::timestamp)
-                        FROM {target_table} {table_alias}, file_bounds fb
-                        WHERE {table_alias}.{entity_column} = ANY(%s::varchar[])
-                        {additional_conditions}
-                        AND {table_alias}.timestamp::timestamp BETWEEN fb.min_time - interval '1 hour' 
-                            AND fb.max_time + interval '1 hour'
-                    ),
-                    'end_time', (
-                        SELECT MAX({table_alias}.timestamp::timestamp)
-                        FROM {target_table} {table_alias}, file_bounds fb
-                        WHERE {table_alias}.{entity_column} = ANY(%s::varchar[])
-                        {additional_conditions}
-                        AND {table_alias}.timestamp::timestamp BETWEEN fb.min_time - interval '1 hour' 
-                            AND fb.max_time + interval '1 hour'
-                    ),
-                    'entities', (
-                        SELECT array_agg(DISTINCT {table_alias}.{entity_column})
-                        FROM {target_table} {table_alias}, file_bounds fb
-                        WHERE {table_alias}.{entity_column} = ANY(%s::varchar[])
-                        {additional_conditions}
-                        AND {table_alias}.timestamp::timestamp BETWEEN fb.min_time - interval '1 hour' 
-                            AND fb.max_time + interval '1 hour'
-                    )
-                )::text
-            ELSE
-                NULL
-            END as overlap_details
+                EXISTS(
+                    SELECT 1 
+                    FROM {target_table} {table_alias}
+                    WHERE {table_alias}.{entity_column} = ANY(%s::varchar[])
+                    {additional_conditions}
+                    AND {table_alias}.timestamp BETWEEN %s - interval '1 hour' 
+                                                   AND %s + interval '1 hour'
+                ) AS has_overlap,
+                jsonb_build_object(
+                    'start_time', (SELECT MIN({table_alias}.timestamp) 
+                                   FROM {target_table} {table_alias}
+                                   WHERE {table_alias}.{entity_column} = ANY(%s::varchar[])
+                                   {additional_conditions}
+                                   AND {table_alias}.timestamp BETWEEN %s - interval '1 hour' 
+                                                                  AND %s + interval '1 hour'),
+                    'end_time', (SELECT MAX({table_alias}.timestamp) 
+                                 FROM {target_table} {table_alias}
+                                 WHERE {table_alias}.{entity_column} = ANY(%s::varchar[])
+                                 {additional_conditions}
+                                 AND {table_alias}.timestamp BETWEEN %s - interval '1 hour' 
+                                                                AND %s + interval '1 hour'),
+                    'entities', (SELECT array_agg(DISTINCT {table_alias}.{entity_column}) 
+                                 FROM {target_table} {table_alias}
+                                 WHERE {table_alias}.{entity_column} = ANY(%s::varchar[])
+                                 {additional_conditions}
+                                 AND {table_alias}.timestamp BETWEEN %s - interval '1 hour' 
+                                                                AND %s + interval '1 hour')
+                ) AS overlap_details
         """
 
-        with self._database_manager.connection_context() as conn:
-            with conn.cursor() as cur:
-                # Prepare query parameters
-                params = [min_time, max_time]
-                # Add entities for each condition
-                for _ in range(5):  # We use entities 5 times in the query
-                    params.append(entities)
-                    if meters is not None:
-                        params.append(meters)
+        # Prepare query parameters
+        params = [entities, min_time, max_time, entities, min_time, max_time, entities, min_time, max_time, entities,
+                  min_time, max_time]
+        if meters is not None:
+            params.insert(1, meters)  # Insert meters in the correct position for each placeholder occurrence
 
-                cur.execute(query, tuple(params))
-                has_overlap, overlap_details = cur.fetchone()
+        result = self._database_manager.execute_query(query, params=tuple(params), fetch_all=False)
 
-                if not has_overlap:
-                    return {
-                        'has_overlap': False,
-                        'overlap_details': None,
-                        'overlap_range': None,
-                        'affected_entities': []
-                    }
+        # Handle no overlap case
+        if not result or not result.get('has_overlap'):
+            return {
+                'has_overlap': False,
+                'overlap_details': None,
+                'overlap_range': None,
+                'affected_entities': []
+            }
 
-                details = json.loads(overlap_details)
-                entity_type = 'building(s)' if target_table=='raw' else 'site(s)'
+        details = result['overlap_details']
+        entity_type = 'building(s)' if target_table=='raw' else 'site(s)'
 
-                return {
-                    'has_overlap': True,
-                    'overlap_details': (
-                        f"Found overlapping data for {entity_type} {', '.join(details['entities'])} "
-                        f"between {details['start_time']} and {details['end_time']}"
-                    ),
-                    'overlap_range': (
-                        pd.to_datetime(details['start_time']),
-                        pd.to_datetime(details['end_time'])
-                    ),
-                    'affected_entities': details['entities']
-                }
+        return {
+            'has_overlap': True,
+            'overlap_details': (
+                f"Found overlapping data for {entity_type} {', '.join(details['entities'])} "
+                f"between {details['start_time']} and {details['end_time']}"
+            ),
+            'overlap_range': (
+                pd.to_datetime(details['start_time']),
+                pd.to_datetime(details['end_time'])
+            ),
+            'affected_entities': details['entities']
+        }
 
     def _check_metadata_overlap(self, df: pd.DataFrame) -> Dict[str, Any]:
         """Check for overlapping building metadata."""
