@@ -1,4 +1,5 @@
 import psycopg2
+from psycopg2 import pool
 from psycopg2.extras import DictCursor
 from psycopg2.extensions import ISOLATION_LEVEL_AUTOCOMMIT
 from typing import List, Dict, Any, Optional, Union
@@ -80,7 +81,7 @@ class PostgresManager:
     )
     def _initialize_connection_pool(self) -> None:
         """Initialize the PostgreSQL connection pool."""
-        self._pool = psycopg2.pool.SimpleConnectionPool(
+        self._pool = pool.SimpleConnectionPool(
             minconn=self.config.min_connections,
             maxconn=self.config.max_connections,
             host=self.config.host,
@@ -123,10 +124,6 @@ class PostgresManager:
 
     @contextmanager
     def connection_context(self):
-        """Provide a transactional connection context."""
-
-        def connection_context(self):
-            """Provide a transactional connection context with logging."""
             conn = self.get_connection()
             self._logger.debug(f"Acquired connection: {conn}")
             try:

@@ -250,15 +250,12 @@ class PostgresDataLoader(BaseDataLoader):
 
     def _create_staging_table(self, source_table: str, staging_table: str):
         """Create a staging table without indexes."""
-        conn = self._database_manager.get_connection()
-        try:
+        with self._database_manager.connection_context() as conn:
             with conn.cursor() as cur:
                 cur.execute(f"CREATE UNLOGGED TABLE {staging_table} (LIKE {source_table})")
                 cur.execute(f"ALTER TABLE {staging_table} SET unlogged")
                 conn.commit()
                 self._logger.info(f"Created staging table: {staging_table}")
-        finally:
-            self._database_manager.release_connection(conn)
 
     def _check_data_overlap(self, df: pd.DataFrame, target_table: str) -> Dict[str, Any]:
         """
@@ -701,18 +698,14 @@ class PostgresDataLoader(BaseDataLoader):
         Returns:
             list: Ordered list of column names
         """
-        conn = self._database_manager.get_connection()
-        try:
-            with conn.cursor() as cur:
-                cur.execute("""
-                        SELECT column_name 
-                        FROM information_schema.columns 
-                        WHERE table_name = %s 
-                        ORDER BY ordinal_position
-                    """, (table_name,))
-                return [row[0] for row in cur.fetchall()]
-        finally:
-            self._database_manager.release_connection(conn)
+        query = """
+            SELECT column_name 
+            FROM information_schema.columns 
+            WHERE table_name = %s 
+            ORDER BY ordinal_position
+        """
+        result = self._database_manager.execute_query(query, params=(table_name,), fetch_all=True)
+        return [row['column_name'] for row in result]
 
     def _cleanup_staging(self, staging_table: str):
         """Drop the staging table."""
