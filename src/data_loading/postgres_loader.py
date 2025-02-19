@@ -690,11 +690,13 @@ class PostgresDataLoader(BaseDataLoader):
 
     def _cleanup_staging(self, staging_table: str):
         """Drop the staging table."""
-        with self._database_manager.connection_context() as conn:
-            with conn.cursor() as cur:
-                cur.execute(f"DROP TABLE IF EXISTS {staging_table}")
-                conn.commit()
+        try:
+            query = f"DROP TABLE IF EXISTS {staging_table}"
+            self._database_manager.execute_query(query, fetch_all=False)
             self._logger.info(f"Dropped staging table {staging_table}")
+        except Exception as e:
+            self._logger.error(f"Failed to drop staging table {staging_table}: {e}")
+            raise
 
     def _process_chunk_result(self, chunk_info: Dict, result: Dict,
                               chunk_statuses: List, total_rows_loaded: int,
@@ -746,6 +748,15 @@ class PostgresDataLoader(BaseDataLoader):
         }
 
 
+    @backoff.on_exception(
+        backoff.expo,
+        (psycopg2.OperationalError, psycopg2.InterfaceError),
+        max_tries=self._max_retries,
+        on_backoff=lambda details: self._logger.warning(
+            f"Chunk load attempt {details['tries']} failed. "
+            f"Retrying in {details['wait']:.2f}s..."
+        ),
+    )
     def _load_chunk_with_retry(
             self,
             df: pd.DataFrame,
@@ -755,38 +766,20 @@ class PostgresDataLoader(BaseDataLoader):
         """
         Load a single chunk with improved performance and connection handling.
         """
-        for attempt in range(self._max_retries):
-            try:
-                start_time = time.time()
+        start_time = time.time()
 
-                with self._engine.begin() as conn:
-                    df.to_sql(
-                        table_name,
-                        conn,
-                        if_exists='replace' if is_first_chunk else 'append',
-                        index=False,
-                        method='multi',
-                        chunksize=100000  # Optimize bulk insert size
-                    )
+        with self._engine.begin() as conn:
+            df.to_sql(
+                table_name,
+                conn,
+                if_exists='replace' if is_first_chunk else 'append',
+                index=False,
+                method='multi',
+                chunksize=100000  # Optimize bulk insert size
+            )
 
-                duration = time.time() - start_time
-                return {'duration': duration}
-
-            except (SQLAlchemyError, psycopg2.Error) as e:
-                delay = self._retry_delay * (2 ** attempt)
-
-                if attempt < self._max_retries - 1:
-                    self._logger.warning(
-                        f"Chunk load attempt {attempt + 1} failed. "
-                        f"Retrying in {delay:.2f} seconds. Error: {e}"
-                    )
-                    time.sleep(delay)
-                else:
-                    self._logger.error(
-                        f"Chunk load failed after {self._max_retries} attempts. "
-                        f"Error: {e}"
-                    )
-                    raise
+        duration = time.time() - start_time
+        return {'duration': duration}
 
     def create_table(self,
                       schema_file: Union[str, Path],
