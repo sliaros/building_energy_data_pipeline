@@ -124,11 +124,32 @@ class PostgresManager:
     @contextmanager
     def connection_context(self):
         """Provide a transactional connection context."""
-        conn = self.get_connection()
-        try:
-            yield conn
-        finally:
-            self.release_connection(conn)
+
+        def connection_context(self):
+            """Provide a transactional connection context with logging."""
+            conn = self.get_connection()
+            self._logger.debug(f"Acquired connection: {conn}")
+            try:
+                yield conn
+            finally:
+                self._logger.debug(f"Releasing connection: {conn}")
+                self.release_connection(conn)
+
+    @contextmanager
+    def transaction_context(self):
+        """
+        Provide a transactional context for multiple operations.
+        """
+        with self._database_manager.connection_context() as conn:
+            try:
+                conn.autocommit = False
+                yield conn
+                conn.commit()
+            except Exception as e:
+                conn.rollback()
+                raise
+            finally:
+                conn.autocommit = True
 
     def close_all_connections(self):
         """Close all connections in the pool."""
