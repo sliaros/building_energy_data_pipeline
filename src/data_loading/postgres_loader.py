@@ -436,27 +436,24 @@ class PostgresDataLoader(BaseDataLoader):
                 NULL
             END as existing_buildings
         """
+        result = self._database_manager.execute_query(query, params=(buildings, buildings, buildings), fetch_all=False)
+        has_overlap, existing_buildings = result['has_overlap'], result['existing_buildings']
 
-        with self._database_manager.connection_context() as conn:
-            with conn.cursor() as cur:
-                cur.execute(query, (buildings, buildings, buildings))
-                has_overlap, existing_buildings = cur.fetchone()
+        if not has_overlap:
+            return {
+                'has_overlap': False,
+                'overlap_details': None,
+                'overlap_range': None,
+                'affected_entities': []
+            }
 
-                if not has_overlap:
-                    return {
-                        'has_overlap': False,
-                        'overlap_details': None,
-                        'overlap_range': None,
-                        'affected_entities': []
-                    }
-
-                existing = json.loads(existing_buildings)
-                return {
-                    'has_overlap': True,
-                    'overlap_details': f"Found existing metadata for building(s): {', '.join(existing)}",
-                    'overlap_range': None,  # Metadata doesn't have time range
-                    'affected_entities': existing
-                }
+        existing = json.loads(existing_buildings)
+        return {
+            'has_overlap': True,
+            'overlap_details': f"Found existing metadata for building(s): {', '.join(existing)}",
+            'overlap_range': None,  # Metadata doesn't have time range
+            'affected_entities': existing
+        }
 
     def _process_chunk_with_retry(
             self,
