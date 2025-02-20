@@ -65,9 +65,9 @@ class PostgresManager:
             setup_logging(
                 log_file='C:\\slPrivateData\\00_portfolio\\building_energy_data_pipeline\\logs\\application.log')
 
-        self._connection_pool = []
-        self._pool_lock = threading.Lock()
-        self._initialize_connection_pool()
+        # self._connection_pool = []
+        # self._pool_lock = threading.Lock()
+        self.verify_connection()
         self.query_history = []
         self.max_query_history = 1000
 
@@ -162,6 +162,7 @@ class PostgresManager:
             bool: Connection status
         """
         try:
+            self._initialize_connection_pool()
             # Try to create a connection using the established connection method
             with self.connection_context() as conn:
                 self._logger.info("Successfully connected to database")

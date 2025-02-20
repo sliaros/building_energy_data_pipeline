@@ -55,7 +55,7 @@ class PostgresDataLoader(BaseDataLoader):
                 file_utils,
                 max_workers: int = 4,
                 max_retries: int = 3,
-                retry_delay: float = 1.0,
+                # retry_delay: float = 1.0,
                 db_type: str = "staging",
                 db_params: Optional[Dict] = None,
                 sampling_strategy: Optional[BaseSamplingStrategy] = None
@@ -71,7 +71,7 @@ class PostgresDataLoader(BaseDataLoader):
 
             self._max_workers = max_workers
             self._max_retries = max_retries
-            self._retry_delay = retry_delay
+            # self._retry_delay = retry_delay
 
             self._db_params = self._get_db_params(db_type, db_params)
             self._db_config = DatabaseConfig(
@@ -494,7 +494,7 @@ class PostgresDataLoader(BaseDataLoader):
 
         @backoff.on_exception(
             backoff.expo,
-            (psycopg2.OperationalError, psycopg2.InterfaceErro),
+            (psycopg2.OperationalError, psycopg2.InterfaceError),
             max_tries=self._max_retries,
             on_backoff=lambda details: self._logger.warning(
                 f"Chunk {chunk_index} load attempt {details['tries']} failed. "
