@@ -1,6 +1,5 @@
 import psycopg2
 from sqlalchemy import create_engine
-from sqlalchemy.exc import SQLAlchemyError
 from concurrent.futures import ThreadPoolExecutor
 import time
 import math
@@ -751,8 +750,8 @@ class PostgresDataLoader(BaseDataLoader):
     @backoff.on_exception(
         backoff.expo,
         (psycopg2.OperationalError, psycopg2.InterfaceError),
-        max_tries=super()._max_retries,
-        on_backoff=lambda details: super()._logger.warning(
+        max_tries=3,
+        on_backoff=lambda details: logging.getLogger(__name__).warning(
             f"Chunk load attempt {details['tries']} failed. "
             f"Retrying in {details['wait']:.2f}s..."
         ),
