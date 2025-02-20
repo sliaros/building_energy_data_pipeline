@@ -1069,6 +1069,11 @@ if __name__=="__main__":
         {'name': 'email', 'type': 'VARCHAR(255)', 'nullable': False},
         {'name': 'created_at', 'type': 'TIMESTAMP', 'default': 'CURRENT_TIMESTAMP'}
     ]
+
+    from src.schema_generator.schema_analyzer import SQLSchemaGenerator
+
+    table_schema = SQLSchemaGenerator().generate_schema_from_columns('users', columns)
+
     db.create_table('users', columns, primary_key='id')
 
     # Get database health metrics

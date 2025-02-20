@@ -236,3 +236,23 @@ class SQLSchemaGenerator:
             footer.append("--")
 
         return footer
+
+    def generate_schema_from_columns(self, table_name: str, columns: List[Dict[str, str]]) -> str:
+        """Generate a SQL CREATE TABLE statement from column definitions."""
+        try:
+            column_definitions = []
+            for col in columns:
+                definition = f"{col['name']} {col['type']}"
+                if col.get('nullable') is False:
+                    definition += " NOT NULL"
+                if col.get('default'):
+                    definition += f" DEFAULT {col['default']}"
+                column_definitions.append(definition)
+            return f"""
+                CREATE TABLE IF NOT EXISTS {table_name} (
+                    {', '.join(column_definitions)}
+                );
+            """
+        except Exception as e:
+            self._logger.error(f"Schema generation failed: {str(e)}")
+            raise
