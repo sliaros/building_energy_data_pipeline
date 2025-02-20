@@ -220,6 +220,117 @@ class PostgresManager:
             self._logger.error(f"Database creation failed: {str(e)}")
             return False
 
+    def get_active_sessions(self, filters: Optional[Dict[str, str]] = None) -> List[Dict]:
+        """
+        Retrieves active PostgreSQL sessions with optional filtering.
+
+        Args:
+            filters (Optional[Dict[str, str]]): A dictionary of column-value pairs to filter sessions.
+                Example: {"database_name": "mydb", "state": "active"}
+
+        Returns:
+            List[Dict]: A list of dictionaries containing session details.
+        """
+        base_query = """
+        SELECT 
+            pid, 
+            usename AS username, 
+            datname,
+            application_name, 
+            client_addr, 
+            client_port, 
+            state, 
+            backend_start, 
+            query_start, 
+            state_change, 
+            query 
+        FROM pg_stat_activity
+        """
+
+        conditions = []
+        params = []
+
+        if filters:
+            for key, value in filters.items():
+                conditions.append(f"{key} = %s")
+                params.append(value)
+
+        if conditions:
+            base_query += " WHERE " + " AND ".join(conditions)
+
+        base_query += " ORDER BY backend_start DESC;"
+
+        try:
+            return self.execute_query(base_query, params=tuple(params), fetch_all=True)
+        except Exception as e:
+            self._logger.error(f"Error retrieving active sessions: {str(e)}")
+            return []
+
+    def terminate_session_by_pid(self, pid: int) -> bool:
+        """
+        Terminates a PostgreSQL session by its process ID (PID).
+
+        Args:
+            pid (int): The process ID of the session to terminate.
+
+        Returns:
+            bool: True if the session was terminated successfully, False otherwise.
+        """
+        query = "SELECT pg_terminate_backend(%s);"
+
+        try:
+            result = self.execute_query(query, params=(pid,), fetch_all=False)
+
+            if result and result.get('pg_terminate_backend'):  # Should return True if successful
+                self._logger.info(f"Session with PID {pid} terminated successfully.")
+                return True
+            else:
+                self._logger.warning(f"Failed to terminate session with PID {pid}.")
+                return False
+
+        except Exception as e:
+            self._logger.error(f"Error terminating session {pid}: {str(e)}")
+            return False
+
+    def drop_database(self, database_name: str) -> bool:
+        """
+        Drops a PostgreSQL database.
+
+        Args:
+            database_name (str): The name of the database to drop.
+
+        Returns:
+            bool: True if the database was dropped successfully, False otherwise.
+        """
+        query = f"DROP DATABASE {database_name}"  # Enable autocommit
+
+        self.close_all_connections()
+        conn = psycopg2.connect(
+            host=self.config.host,
+            port=self.config.port,
+            database=self.config.database,
+            user=self.config.user,
+            password=self.config.password,
+            application_name=self.config.application_name,
+            connect_timeout=self.config.connection_timeout,
+            sslmode=self.config.ssl_mode if self.config.enable_ssl else 'disable'
+        )
+        conn.autocommit = True  # Enable autocommit:
+
+        try:
+                with conn.cursor() as cur:
+                    cur.execute(query)
+                self._logger.info(f"Database {database_name} dropped successfully")
+                return True
+
+        except Exception as e:
+                self._logger.error(f"Failed to drop database {database_name}: {str(e)}")
+                return False
+
+        finally:
+                if conn and not conn.closed:
+                    conn.close()
+
     def postgres_params_to_sqlalchemy_url(self) -> URL:
         """
         Convert PostgreSQL parameters to SQLAlchemy URL.
@@ -283,65 +394,54 @@ class PostgresManager:
         result = self.execute_query(query, (table_name,), fetch_all=False)
         return result["exists"] if result else False
 
-    def create_table_from_definition(self, table_name: str, columns: List[Dict[str, str]],
-                     primary_key: Optional[str] = None) -> bool:
-        """Create a new table with specified columns and constraints."""
-        column_definitions = []
-        for col in columns:
-            definition = f"{col['name']} {col['type']}"
-            if col.get('nullable') is False:
-                definition += " NOT NULL"
-            if col.get('default'):
-                definition += f" DEFAULT {col['default']}"
-            column_definitions.append(definition)
+    def create_table_from_schema(
+            self, schema: Union[str, Path], table_name: str, if_exists: str = "fail"
+    ) -> bool:
+        """Create a table based on the provided schema file or SQL query."""
 
-        if primary_key:
-            column_definitions.append(f"PRIMARY KEY ({primary_key})")
-
-        create_query = f"""
-            CREATE TABLE IF NOT EXISTS {table_name} (
-                {', '.join(column_definitions)}
-            )
-        """
+        def _detect_input_type(input_str: str) -> str:
+            """Detect if the input is a file or a SQL query."""
+            if Path(input_str).is_file():
+                return "file"
+            if input_str.strip().upper().startswith(("SELECT", "INSERT", "UPDATE", "DELETE", "CREATE", "DROP")):
+                return "query"
+            return "unknown"
 
         try:
-            self.execute_query(create_query)
-            self._logger.info(f"Table {table_name} created successfully")
-            return True
-        except Exception as e:
-            self._logger.error(f"Failed to create table {table_name}: {str(e)}")
-            return False
+            if not schema:
+                raise ValueError("Schema input cannot be None or empty.")
+            if not table_name:
+                raise ValueError("Table name cannot be None or empty.")
 
-    def create_table_from_schema(self,
-                      schema_file: Union[str, Path],
-                      table_name: str,
-                      if_exists: str = 'fail') -> None:
-        """Create a table based on the provided schema file and database connection parameters."""
-        assert if_exists in ['fail', 'replace']
+            input_type = _detect_input_type(str(schema))
 
-        try:
-            if schema_file:
-                schema_file = Path(schema_file)
-                if not schema_file.exists():
-                    raise FileNotFoundError(f"Schema file not found: {schema_file}")
-                with open(schema_file, 'r') as f:
-                    sql_schema = f.read()
+            if input_type=="file":
+                schema_file = Path(schema)
+                sql_schema = schema_file.read_text(encoding="utf-8")
+            elif input_type=="query":
+                sql_schema = schema.strip()
+            else:
+                raise ValueError("Schema must be a valid file path or a SQL query string.")
 
             if self.table_exists(table_name):
-                if if_exists=='replace':
-                    self._logger.info(f"Table {table_name} already exists in database")
-                    self._logger.info(f"Dropping table {table_name}")
+                if if_exists=="replace":
+                    self._logger.info(f"Table '{table_name}' exists. Dropping and recreating.")
                     self.drop_table(table_name)
                 else:
-                    self._logger.info(f"Aborting creation of table {table_name}")
-                    return
+                    self._logger.info(f"Table '{table_name}' exists. Aborting creation.")
+                    return False
 
             self.execute_query(sql_schema)
-            self._logger.info(f"Successfully created table {table_name} in database")
+            self._logger.info(f"Successfully created table '{table_name}'.")
             return True
+
+        except FileNotFoundError as fnf_error:
+            self._logger.error(f"Schema file not found: {fnf_error}")
+        except ValueError as val_error:
+            self._logger.error(f"Invalid input: {val_error}")
         except Exception as e:
-            self._logger.error(f"Failed to create table {table_name}: {str(e)}")
-            return False
+            self._logger.error(f"Unexpected error creating table '{table_name}': {e}")
+        return False
 
     def drop_table(self, table_name: str, cascade: bool = False) -> bool:
         """Drop a table with safety checks."""
@@ -485,20 +585,16 @@ class PostgresManager:
         self._cached_query.cache_clear()
 
     # Database Maintenance Methods
-    def vacuum_analyze_table(self, table_name: str, full: bool = False) -> bool:
+    def vacuum_analyze_table(self, table_name: str, full: bool = False):
         """Perform VACUUM ANALYZE on a table."""
-        try:
-            with self.get_connection() as conn:
-                old_isolation_level = conn.isolation_level
+        with self.connection_context() as conn:
+            try:
                 conn.set_isolation_level(ISOLATION_LEVEL_AUTOCOMMIT)
                 with conn.cursor() as cur:
                     vacuum_type = "FULL" if full else ""
                     cur.execute(f"VACUUM {vacuum_type} ANALYZE {table_name}")
-                conn.set_isolation_level(old_isolation_level)
-            return True
-        except Exception as e:
-            self._logger.error(f"Vacuum analyze failed for {table_name}: {str(e)}")
-            return False
+            except Exception as e:
+                self._logger.error(f"Vacuum analyze failed for {table_name}: {str(e)}")
 
     def reindex_table(self, table_name: str, concurrent: bool = True) -> bool:
         """Reindex a table and its indexes."""
@@ -669,7 +765,7 @@ class PostgresManager:
         query = """
             SELECT
                 schemaname,
-                tablename,
+                relname AS tablename,
                 seq_scan,
                 seq_tup_read,
                 idx_scan,
@@ -677,7 +773,7 @@ class PostgresManager:
                 n_dead_tup
             FROM pg_stat_user_tables
             WHERE seq_scan > %s
-                AND (idx_scan / GREATEST(seq_scan, 1))::float < 0.1
+                AND (COALESCE(idx_scan, 0) / GREATEST(seq_scan, 1))::float < 0.1
             ORDER BY seq_tup_read DESC
         """
         return self.execute_query(query, (min_scans,))
@@ -687,17 +783,17 @@ class PostgresManager:
         query = """
             SELECT
                 schemaname,
-                tablename,
-                indexname,
+                relname AS tablename,
+                indexrelname AS indexname,
                 idx_scan,
-                pg_size_pretty(pg_relation_size(schemaname || '.' || indexname::text)) as index_size,
-                pg_relation_size(schemaname || '.' || indexname::text) as index_size_bytes
+                pg_size_pretty(pg_relation_size(schemaname || '.' || indexrelname::text)) as index_size,
+                pg_relation_size(schemaname || '.' || indexrelname::text) as index_size_bytes
             FROM pg_stat_user_indexes
             WHERE idx_scan = 0
-                AND pg_relation_size(schemaname || '.' || indexname::text) > %s
-                AND indexname NOT LIKE '%%_pkey'
-                AND indexname NOT LIKE '%%_unique'
-            ORDER BY pg_relation_size(schemaname || '.' || indexname::text) DESC
+                AND pg_relation_size(schemaname || '.' || indexrelname::text) > %s
+                AND indexrelname NOT LIKE '%%_pkey'
+                AND indexrelname NOT LIKE '%%_unique'
+            ORDER BY pg_relation_size(schemaname || '.' || indexrelname::text) DESC
         """
         return self.execute_query(query, (min_size_bytes,))
 
@@ -867,7 +963,7 @@ class PostgresManager:
             columns = self.get_columns(table_name)
             query = f"COPY (SELECT {', '.join(columns)} FROM {table_name}) TO STDOUT WITH CSV HEADER"
 
-            with self.get_connection() as conn:
+            with self.connection_context() as conn:
                 with conn.cursor() as cur:
                     with open(output_path, "w") as f:
                         cur.copy_expert(query, f)
@@ -971,7 +1067,7 @@ class PostgresManager:
             WHERE r.rolname NOT LIKE 'pg_%'
             GROUP BY r.rolname, r.rolsuper, r.rolinherit, r.rolcreaterole,
                      r.rolcreatedb, r.rolcanlogin, r.rolreplication,
-                     r.rolconnlimit, r.rolvaliduntil
+                     r.rolconnlimit, r.rolvaliduntil, r.oid
         """
         return self.execute_query(query)
 
@@ -1074,32 +1170,35 @@ if __name__=="__main__":
 
     table_schema = SQLSchemaGenerator().generate_schema_from_columns('users', columns)
 
-    db.create_table('users', columns, primary_key='id')
+    db.create_table_from_schema(table_schema, 'users', if_exists='raplace')
 
     # Get database health metrics
     db_size = db.get_database_size()
     table_sizes = db.get_table_sizes()
     slow_queries = db.get_slow_queries()
+    table_info = db.get_table_definition('users')
+    dependencies = db.get_table_dependencies('users')
 
     # Perform maintenance
     db.vacuum_analyze_table('users')
 
     # Get table information
-    table_info = db.get_table_definition('users')
-    dependencies = db.get_table_dependencies('users')
-
     print("Database size:", db_size)
-    print("Table sizes:", json.dumps(table_sizes, indent=2))
+    # print("Table sizes:", json.dumps(table_sizes, indent=2))
+    print("Slow queries:", json.dumps(slow_queries, indent=2))
+    print("Table info:", json.dumps(table_info, indent=2))
+    print("Dependencies:", json.dumps(dependencies, indent=2))
+    # print("Exported table to CSV:", db.export_table_to_csv('users', 'users.csv'))
 
     # Example usage of advanced features
     # Get database health metrics
-    db_size = db.get_database_size()
-    table_sizes = db.get_table_sizes()
     cache_stats = db.get_cache_hit_ratios()
     bloat_analysis = db.get_bloat_analysis()
+    print(cache_stats, bloat_analysis)
 
     # Monitor replication
     replication_status = db.get_replication_status()
+    print(replication_status)
 
     # Analyze performance
     missing_indexes = db.get_missing_indexes()
@@ -1108,6 +1207,5 @@ if __name__=="__main__":
     # Security audit
     user_permissions = db.audit_user_permissions()
 
-    print("Database size:", db_size)
-    print("Cache hit ratios:", json.dumps(cache_stats, indent=2))
-    print("Bloat analysis:", json.dumps(bloat_analysis, indent=2))
+    print("Cache hit ratios:", cache_stats)
+    print("Bloat analysis:", bloat_analysis)

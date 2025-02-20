@@ -3,12 +3,14 @@ import yaml
 import logging
 from typing import Dict, Any
 from src.data_extraction.data_extractor import DataExtractor
-from src.data_loading.postgres_loader import PostgresDataLoader
+from src.data_loading.data_loader import PostgresDataLoader
 from src.data_transformation.data_transformer import DataTransformer
 from logs.logging_config import setup_logging
 from src.utility.file_utils import FileUtils
 from src.schema_generator.schema_analysis_orchestrator import SchemaAnalysisManager
+from src.postgres_managing.postgres_manager import PostgresManager, DatabaseConfig
 import pandas as pd
+import json
 
 class Orchestrator:
 
@@ -48,10 +50,11 @@ class Orchestrator:
                 for key, value in structure.items():
                     new_path = os.path.join(current_path, key)
                     os.makedirs(new_path, exist_ok=True)
-                    init_file_path = os.path.join(new_path, '__init__.py')
-                    if not os.path.exists(init_file_path):
-                        with open(init_file_path, 'w') as init_file:
-                            init_file.write('# This file makes this directory a Python package\n')
+                    if "src" in new_path:
+                        init_file_path = os.path.join(new_path, '__init__.py')
+                        if not os.path.exists(init_file_path):
+                            with open(init_file_path, 'w') as init_file:
+                                init_file.write('# This file makes this directory a Python package\n')
 
                     _create_dirs(value, new_path)
             # else:
@@ -114,3 +117,45 @@ class Orchestrator:
                     chunk_size=500000,
                     unique_columns=self._config['project_data']['unique_columns'][_table_name]
                 )
+
+    def connect_to_default_database(self):
+        """Establish a connection to the default database."""
+        config = self._config['default_database']
+        return PostgresManager(DatabaseConfig(**config))
+
+    def return_active_sessions(self, filters=None):
+        """
+        Retrieve active sessions with optional filtering and return JSON.
+
+        Args:
+            filters (dict, optional): Filtering conditions (e.g., {"datname": "db_name", "state": "active"}).
+
+        Returns:
+            str: JSON string of active sessions.
+        """
+        pgm = self.connect_to_default_database()
+        sessions = pgm.get_active_sessions(filters)
+        return json.dumps(sessions, default=str, indent=4)
+
+    def terminate_sessions(self, datname, state=None):
+        """
+        Terminate all active sessions for a given database.
+
+        Args:
+            datname (str): Database name.
+            state (str, optional): Session state to filter by (e.g., "active", "idle").
+        """
+        pgm = self.connect_to_default_database()
+        filters = {"datname": datname}
+        if state:
+            filters["state"] = state
+
+        active_sessions = json.loads(self.return_active_sessions(filters))
+
+        for session in active_sessions:
+            pgm.terminate_session_by_pid(session["pid"])
+
+    def delete_database(self, database_name):
+        """Drop a PostgreSQL database."""
+        pgm = self.connect_to_default_database()
+        pgm.drop_database(database_name)

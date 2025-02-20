@@ -158,17 +158,17 @@ class PostgresDataLoader(BaseDataLoader):
         file_type, reader_func = FileUtils.FileReader.get_file_type_and_reader(file_path)
         self._logger.info(f"Processing {file_type} file: {file_path}")
 
-        # Create staging table
-        staging_table = f"{table_name}_staging_{int(time.time())}"
-        self._create_staging_table(table_name, staging_table)
-
         self._logger.info(f"Checking for duplicated or overlapping data")
         df = reader_func(file_path, nrows = 1000)
         if self._check_data_overlap(df, table_name)['has_overlap']:
             self._logger.info(f"Data already exists in {table_name}")
-            return
+            return None
 
         try:
+            # Create staging table
+            staging_table = f"{table_name}_staging_{int(time.time())}"
+            self._create_staging_table(table_name, staging_table)
+
             if file_type=='parquet':
                 # For Parquet, read the file to get total rows
                 df = reader_func(file_path)
@@ -240,6 +240,7 @@ class PostgresDataLoader(BaseDataLoader):
             # Cleanup
             chunk_pbar.close()
             rows_pbar.close()
+            print(staging_table)
             self._cleanup_staging(staging_table)
 
         # Calculate and log final statistics

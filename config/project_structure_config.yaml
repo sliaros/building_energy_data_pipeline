@@ -23,7 +23,7 @@
     # Utility scripts: Tools for utility functions and helper classes
     utility:
     # Describe
-    postgres_manager:
+    postgres_managing:
     # Describe
     schema_generator:
   # Configuration folder: Contains settings and parameters for the pipeline
