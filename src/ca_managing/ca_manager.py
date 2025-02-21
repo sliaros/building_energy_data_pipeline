@@ -6,7 +6,7 @@ from cryptography import x509
 from cryptography.x509.oid import NameOID
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
-from logs.logging_config import setup_logging
+from src.logging_configuration.logging_config import setup_logging
 
 class CaManager:
     def __init__(self, logger = None,

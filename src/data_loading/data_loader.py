@@ -14,7 +14,7 @@ import csv
 from src.schema_generator.sampling_strategies import BaseSamplingStrategy, RandomSamplingStrategy
 import json
 from src.utility.file_utils import FileUtils
-from logs.logging_config import setup_logging
+from src.logging_configuration.logging_config import setup_logging
 import logging
 from src.postgres_managing.postgres_manager import PostgresManager, DatabaseConfig
 from abc import ABC, abstractmethod

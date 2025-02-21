@@ -38,7 +38,7 @@ class ConfigManager:
             self._logger.error(f"Configuration file not found: {file_path}")
             raise
 
-    def _load_configs(self, config_files: list):
+    def _load_configs(self, config_files: list = None):
         """Loads all YAML configuration files and merges them into a single config dictionary."""
         for file in config_files:
             file_path = self.base_path / file

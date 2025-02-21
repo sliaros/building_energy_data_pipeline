@@ -1,5 +1,7 @@
 import logging
 from logging.handlers import RotatingFileHandler
+from src.configuration_managing.config_manager import ConfigManager
+from pathlib import Path
 
 def setup_logging(log_file=None, max_bytes=5*1024*1024, backup_count=3):
     """
@@ -10,6 +12,12 @@ def setup_logging(log_file=None, max_bytes=5*1024*1024, backup_count=3):
         max_bytes (int): Maximum size of a log file before rotation (default: 5 MB).
         backup_count (int): Number of backup files to keep (default: 3).
     """
+    """Configure logging using values from ConfigManager."""
+    config = ConfigManager()
+    log_folder_path = config.get("logging.log_file_path", "logs")
+    log_file_name = config.get("logging.log_file_name", "default.log")
+    log_file = Path(log_folder_path).joinpath(log_file_name)
+
     # Create a custom logger
     logger = logging.getLogger()
     logger.setLevel(logging.DEBUG)  # Capture all levels of logs

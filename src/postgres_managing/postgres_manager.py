@@ -9,10 +9,9 @@ import time
 from dataclasses import dataclass
 from contextlib import contextmanager
 import json
-import threading
 import backoff
 import os
-from logs.logging_config import setup_logging
+from src.logging_configuration.logging_config import setup_logging
 from functools import lru_cache, wraps
 from pathlib import Path
 from sqlalchemy.engine.url import URL

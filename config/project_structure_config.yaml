@@ -28,6 +28,8 @@
     schema_generator:
     # Describe
     configuration_managing:
+    # Describe
+    logging_configuration:
   # Configuration folder: Contains settings and parameters for the pipeline
   config:
   # Logs folder: Contains log files for tracking pipeline execution

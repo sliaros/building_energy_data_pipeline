@@ -13,7 +13,8 @@ project_data:
                    'raw': ['timestamp', 'building_id', 'meter']}
 
 logging:
-  log_file_path: 'C:\\slPrivateData\\00_portfolio\\building_energy_data_pipeline\\\logs\\application.log'
+  log_file_name: 'application.log'
+  log_file_path: './logs'
 
 ssl:
   ssl_cert_path: "cert.pem"

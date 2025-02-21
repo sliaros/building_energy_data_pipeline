@@ -5,7 +5,7 @@ from typing import Dict, Any
 from src.data_extraction.data_extractor import DataExtractor
 from src.data_loading.data_loader import PostgresDataLoader
 from src.data_transformation.data_transformer import DataTransformer
-from logs.logging_config import setup_logging
+from src.logging_configuration.logging_config import setup_logging
 from src.utility.file_utils import FileUtils
 from src.schema_generator.schema_analysis_orchestrator import SchemaAnalysisManager
 from src.postgres_managing.postgres_manager import PostgresManager, DatabaseConfig
@@ -22,19 +22,20 @@ class Orchestrator:
         :param config_path: The path to a YAML configuration file
         """
 
-        self._project_file_structure, self._config = (
-            FileUtils()._load_yaml_file(
-                FileUtils()._define_local_file_path(
-                    'config', _config_file
-                )
-            ) for _config_file in ['project_structure_config.yaml', 'app_config.yaml']
-        )
+        """Initializes the Orchestrator with configurations from ConfigManager."""
+        self.config_manager = ConfigManager()
+        self.config = self.config_manager.config  # Store config for easy access
+        print(self.config)
+        self._create_directories_from_yaml(self.config.get("project_structure", {}))
 
-        self._create_directories_from_yaml(self._project_file_structure)
-
-        setup_logging(log_file=self._config['logging']['log_file_path'])
+        setup_logging(log_file=self.config_manager.get("logging.log_file_path"))
         self._logger = logging.getLogger(self.__class__.__name__)
-        self._logger.info('Orchestrator started')
+        self._logger.info("Orchestrator started")
+
+    def load_config(self):
+        """Reloads the configuration if needed."""
+        self.config_manager._load_configs()
+        self._logger.info("Configuration reloaded successfully")
 
     @staticmethod
     def _create_directories_from_yaml(yaml_content, base_path='.'):
