@@ -26,6 +26,8 @@
     postgres_managing:
     # Describe
     schema_generator:
+    # Describe
+    configuration_managing:
   # Configuration folder: Contains settings and parameters for the pipeline
   config:
   # Logs folder: Contains log files for tracking pipeline execution

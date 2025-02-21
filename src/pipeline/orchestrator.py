@@ -11,6 +11,7 @@ from src.schema_generator.schema_analysis_orchestrator import SchemaAnalysisMana
 from src.postgres_managing.postgres_manager import PostgresManager, DatabaseConfig
 import pandas as pd
 import json
+from src.configuration_managing.config_manager import ConfigManager
 
 class Orchestrator:
 
