@@ -23,18 +23,22 @@ class Orchestrator:
         """
 
         """Initializes the Orchestrator with configurations from ConfigManager."""
-        self.config_manager = ConfigManager()
+        self.config_manager = ConfigManager(
+            ["project_structure_config.yaml", "app_config.yaml"],
+        "./config")
         self.config = self.config_manager.config  # Store config for easy access
-        print(self.config)
+        self.config_manager.validate_config()
         self._create_directories_from_yaml(self.config.get("project_structure", {}))
 
         setup_logging(log_file=self.config_manager.get("logging.log_file_path"))
         self._logger = logging.getLogger(self.__class__.__name__)
+
         self._logger.info("Orchestrator started")
 
-    def load_config(self):
+    def load_config(self, config_files: list[str] = []):
         """Reloads the configuration if needed."""
-        self.config_manager._load_configs()
+        self.config_manager._load_configs(config_files)
+        self.config_manager.validate_config()
         self._logger.info("Configuration reloaded successfully")
 
     @staticmethod

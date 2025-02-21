@@ -24,6 +24,7 @@ class ConfigManager:
         if config_files is None:
             config_files = ["project_structure_config.yaml", "app_config.yaml"]
 
+        self._config_files = config_files
         self._load_configs(config_files)
 
     def _load_yaml_file(self, file_path: Path) -> Dict[str, Any]:
@@ -44,6 +45,7 @@ class ConfigManager:
             file_path = self.base_path / file
             if file_path.exists():
                 self.config.update(self._load_yaml_file(file_path))
+                self._logger.info(f"Loaded config file: {file}")
             else:
                 self._logger.warning(f"Config file {file} not found. Skipping.")
 
@@ -58,6 +60,11 @@ class ConfigManager:
     def validate_config(self):
         """Validate essential configuration keys."""
         required_keys = ["logging.log_file_path", "default_database"]
-        for key in required_keys:
-            if not self.get(key):
-                raise ValueError(f"Missing required configuration: {key}")
+        try:
+            for key in required_keys:
+                if not self.get(key):
+                    raise ValueError(f"Missing required configuration: {key}")
+            self._logger.info("Configuration validation successful.")
+        except ValueError as e:
+            self._logger.error(e)
+            raise
