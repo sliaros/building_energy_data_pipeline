@@ -11,12 +11,10 @@ from contextlib import contextmanager
 import json
 import backoff
 import os
-from src.logging_configuration.logging_config import setup_logging
 from functools import lru_cache, wraps
 from pathlib import Path
 from sqlalchemy.engine.url import URL
 import threading
-from src.configuration_managing.config_manager import ConfigManager
 
 @dataclass
 class DatabaseConfig:
@@ -74,23 +72,25 @@ class PostgresManager:
                 cls._instance._is_temporary = False
         return cls._instance
 
-    def __init__(self, config: DatabaseConfig, temporary=False):
+    def __init__(self, db_config: DatabaseConfig, default_db_config: DatabaseConfig = None, temporary=False):
         """Initialize connection pool only once for Singleton, always for temporary instances"""
         # Skip re-initialization only for non-temporary singleton
         if hasattr(self, "_initialized") and self._initialized and not getattr(self, "_is_temporary", False):
             return
 
-        self.config = config
-        self._logger = config.logger or logging.getLogger(self.__class__.__name__)
+        self.config = db_config
+        self.default_db_config = default_db_config
+
+        self._logger = db_config.logger or logging.getLogger(self.__class__.__name__)
         self._pool = None
-        self._initialized = True
+        self._initialized = False
         self._is_temporary = getattr(self, "_is_temporary", False)
 
         self.query_history = []
         self.max_query_history = 1000
 
         # Only verify connection for non-temporary instances or when explicitly initializing
-        if not self._is_temporary or temporary:
+        if not self._initialized or temporary:
             self.verify_connection_with_database()
 
     @classmethod
@@ -200,57 +200,48 @@ class PostgresManager:
                 return True
         except psycopg2.OperationalError as e:
             if "does not exist" in str(e):
-                return self._create_database()
+                self.create_database()
             self._logger.error(f"Connection verification failed: {str(e)}")
             raise
 
-    def _create_database(self) -> bool:
-        """
-        Create a new database if it doesn't exist.
-
-        Returns:
-            bool: Database creation status
-        """
-        # Create a modified configuration for connecting to 'postgres' database
-        temp_config = DatabaseConfig(
-            host=self.config.host,
-            port=self.config.port,
-            database='postgres',  # Connect to default postgres database
-            user=self.config.user,
-            password=self.config.password,
-            logger=self.config.logger,
-            application_name=self.config.application_name,
-            connection_timeout=self.config.connection_timeout,
-            enable_ssl=self.config.enable_ssl,
-            ssl_mode=self.config.ssl_mode
-        )
-
-        try:
-            # Create connection to postgres database with autocommit mode
-            conn = psycopg2.connect(
-                host=temp_config.host,
-                port=temp_config.port,
-                database=temp_config.database,
-                user=temp_config.user,
-                password=temp_config.password,
-                application_name=temp_config.application_name,
-                connect_timeout=temp_config.connection_timeout,
-                sslmode=temp_config.ssl_mode if temp_config.enable_ssl else 'disable'
-            )
-            conn.autocommit = True  # Enable autocommit
-
-            try:
-                with conn.cursor() as cur:
-                    cur.execute(f"CREATE DATABASE {self.config.database}")
-                self._logger.info(f"Created database {self.config.database}")
-                return True
-            finally:
-                if conn and not conn.closed:
-                    conn.close()
-
-        except Exception as e:
-            self._logger.error(f"Database creation failed: {str(e)}")
-            return False
+    # def _create_database(self) -> bool:
+    #     """
+    #     Create a new database if it doesn't exist.
+    #
+    #     Returns:
+    #         bool: Database creation status
+    #     """
+    #     # Create a modified configuration for connecting to 'postgres' database
+    #     temp_config = self.default_db_config
+    #
+    #     try:
+    #         # Create connection to postgres database with autocommit mode
+    #         conn = psycopg2.connect(
+    #             host=temp_config.host,
+    #             port=temp_config.port,
+    #             database=temp_config.database,
+    #             user=temp_config.user,
+    #             password=temp_config.password,
+    #             application_name=temp_config.application_name,
+    #             connect_timeout=temp_config.connection_timeout,
+    #             sslmode=temp_config.ssl_mode if temp_config.enable_ssl else 'disable'
+    #         )
+    #         conn.autocommit = True  # Enable autocommit
+    #     except Exception as e:
+    #         self._logger.error(f"Failed to connect to 'postgres' database: {str(e)}")
+    #         raise
+    #
+    #         try:
+    #             with conn.cursor() as cur:
+    #                 cur.execute(f"CREATE DATABASE {self.config.database}")
+    #                 self._logger.info(f"Created database {self.config.database}")
+    #         finally:
+    #                 if conn and not conn.closed:
+    #                     conn.close()
+    #
+    #     except Exception as e:
+    #         self._logger.error(f"Database creation failed: {str(e)}")
+    #         raise
 
     def get_active_sessions(self, filters: Optional[Dict[str, str]] = None) -> List[Dict]:
         """
@@ -324,44 +315,67 @@ class PostgresManager:
             self._logger.error(f"Error terminating session {pid}: {str(e)}")
             return False
 
-    def drop_database(self, database_name: str) -> bool:
+    def execute_standalone_query(self, query: str, params: tuple = None, default_db_config: Dict = None) -> bool | None:
         """
-        Drops a PostgreSQL database.
+        Executes queries that require a standalone connection with autocommit.
 
         Args:
-            database_name (str): The name of the database to drop.
+            query (str): The SQL query to execute.
+            params (tuple, optional): Query parameters for safe execution.
+            default_db_config (DatabaseConfig, optional): Database config for standalone connection.
 
         Returns:
-            bool: True if the database was dropped successfully, False otherwise.
+            bool: True if the query executes successfully, False otherwise.
         """
-        DatabaseConfig(**self.config_manager.get(None, default="default_database"))
-
-        query = f"DROP DATABASE {database_name}"
-
-        conn = psycopg2.connect(
-            host=self.config.host,
-            port=self.config.port,
-            database=self.config.database,
-            user=self.config.user,
-            password=self.config.password,
-            application_name=self.config.application_name,
-            connect_timeout=self.config.connection_timeout,
-            sslmode=self.config.ssl_mode if self.config.enable_ssl else 'disable'
-        )
-        conn.autocommit = True  # Enable autocommit:
+        default_db_config = default_db_config or self.default_db_config
+        conn = None
 
         try:
-                with conn.cursor() as cur:
-                    cur.execute(query)
-                self._logger.info(f"Database {database_name} dropped successfully")
+            # Open a standalone connection using the provided config
+            conn = psycopg2.connect(
+                port=default_db_config.port,
+                database=default_db_config.database,
+                user=default_db_config.user,
+                password=default_db_config.password,
+                application_name=default_db_config.application_name,
+                connect_timeout=default_db_config.connection_timeout,
+                sslmode=default_db_config.ssl_mode if default_db_config.enable_ssl else 'disable'
+            )  # Unpack config as kwargs
+            conn.autocommit = True  # Prevents implicit transaction blocks
+
+            with conn.cursor() as cur:
+                cur.execute(query, params) if params else cur.execute(query)
+                self._logger.info(f"Executed standalone query: {query}")
 
         except Exception as e:
-                self._logger.error(f"Failed to drop database {database_name}: {str(e)}")
-                raise
+            self._logger.error(f"Failed to execute standalone query: {query} - Error: {str(e)}")
+            raise
 
         finally:
-                if conn and not conn.closed:
-                    conn.close()
+            if conn and not conn.closed:
+                conn.close()  # Close connection to prevent leaks
+
+    def create_database(self, db_name: str, default_db_config: Dict) -> bool:
+        return self.execute_standalone_query(f"CREATE DATABASE {db_name}", default_db_config=default_db_config)
+
+    def drop_database(self, db_name: str, default_db_config: DatabaseConfig = None) -> bool:
+        return self.execute_standalone_query(f"DROP DATABASE {db_name}", default_db_config=default_db_config)
+
+    def create_role(self, role_name: str, password: str, default_db_config: Dict) -> bool:
+        return self.execute_standalone_query(
+            f"CREATE ROLE {role_name} WITH LOGIN PASSWORD %s",
+            params=(password,),
+            default_db_config=default_db_config
+        )
+
+    def drop_role(self, role_name: str, default_db_config: Dict) -> bool:
+        return self.execute_standalone_query(f"DROP ROLE {role_name}", default_db_config=default_db_config)
+
+    def vacuum_full(self, default_db_config: Dict) -> bool:
+        return self.execute_standalone_query("VACUUM FULL", default_db_config=default_db_config)
+
+    def create_extension(self, extension_name: str, default_db_config: DatabaseConfig) -> bool:
+        return self.execute_standalone_query(f"CREATE EXTENSION {extension_name}", default_db_config=default_db_config)
 
     def postgres_params_to_sqlalchemy_url(self) -> URL:
         """

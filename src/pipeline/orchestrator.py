@@ -40,8 +40,9 @@ class Orchestrator:
             self._logger.info("No database selected, reverting to default database")
 
         db_config = DatabaseConfig(**self.config_manager.get(database_name, default="default_database"))
+        default_db_config = DatabaseConfig(**self.config_manager.get(None, default="default_database"))
 
-        self.db_manager = PostgresManager(db_config)
+        self.db_manager = PostgresManager(db_config, default_db_config)
 
         atexit.register(self.cleanup)
 
@@ -174,23 +175,17 @@ class Orchestrator:
         Raises:
             ValueError: If attempting to delete the default database.
         """
-        current_db = self.db_manager.config.database
-        default_database = self.config['default_database']['database']
 
-        if database_name==default_database:
+        if database_name==self.db_manager.default_db_config.database:
             raise ValueError("Cannot delete the default database.")
-
-        try:
-            self.db_manager.drop_database(database_name)
-        except Exception as e:
-            if force and "currently open" in str(e):
-                self.cleanup()
-                # Reconnect with the default database configuration and retry deletion
-                default_db_config = DatabaseConfig(**self.config_manager.get(None, default="default_database"))
-                default_db_manager = PostgresManager.create_temporary_instance(default_db_config)
-
-                default_db_manager.drop_database(database_name)
-                default_db_manager.close_all_connections()
+        else:
+            try:
+                self.db_manager.drop_database(database_name)
+            except Exception as e:
+                if force and "currently open" in str(e):
+                    self.cleanup()
+                    # Reconnect with the default database configuration and retry deletion
+                    self.db_manager.drop_database(database_name, default_db_config)
 
     def cleanup(self):
         """Closes all PostgreSQL connections before exiting"""
