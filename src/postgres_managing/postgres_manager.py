@@ -45,8 +45,8 @@ def configure_connection(func):
         conn = func(self, *args, **kwargs)
         try:
             with conn.cursor() as cur:
-                cur.execute(f"SET work_mem = '{self.config.work_mem}'")
-                cur.execute(f"SET maintenance_work_mem = '{self.config.maintenance_work_mem}'")
+                cur.execute(f"SET work_mem = '{self.db_config.work_mem}'")
+                cur.execute(f"SET maintenance_work_mem = '{self.db_config.maintenance_work_mem}'")
                 cur.execute("SET client_encoding = 'UTF8'")
             return conn
         except Exception as e:
@@ -78,7 +78,7 @@ class PostgresManager:
         if hasattr(self, "_initialized") and self._initialized and not getattr(self, "_is_temporary", False):
             return
 
-        self.config = db_config
+        self.db_config = db_config
         self.default_db_config = default_db_config
 
         self._logger = db_config.logger or logging.getLogger(self.__class__.__name__)
@@ -110,16 +110,16 @@ class PostgresManager:
         """Initialize the PostgreSQL connection pool."""
         if not self._pool:
             self._pool = pool.SimpleConnectionPool(
-                minconn=self.config.min_connections,
-                maxconn=self.config.max_connections,
-                host=self.config.host,
-                port=self.config.port,
-                database=self.config.database,
-                user=self.config.user,
-                password=self.config.password,
-                sslmode=self.config.ssl_mode if self.config.enable_ssl else 'disable'
+                minconn=self.db_config.min_connections,
+                maxconn=self.db_config.max_connections,
+                host=self.db_config.host,
+                port=self.db_config.port,
+                database=self.db_config.database,
+                user=self.db_config.user,
+                password=self.db_config.password,
+                sslmode=self.db_config.ssl_mode if self.db_config.enable_ssl else 'disable'
             )
-            self._logger.info(f"{self.config.database}: Initialized PostgreSQL connection pool [{self.config.host}:{self.config.port}]")
+            self._logger.info(f"{self.db_config.database}: Initialized PostgreSQL connection pool [{self.db_config.host}:{self.db_config.port}]")
 
     @configure_connection
     @backoff.on_exception(
@@ -162,21 +162,21 @@ class PostgresManager:
                 self._logger.debug(f"Releasing connection: {conn}")
                 self.release_connection(conn)
 
-    @contextmanager
-    def transaction_context(self):
-        """
-        Provide a transactional context for multiple operations.
-        """
-        with self._database_manager.connection_context() as conn:
-            try:
-                conn.autocommit = False
-                yield conn
-                conn.commit()
-            except Exception as e:
-                conn.rollback()
-                raise
-            finally:
-                conn.autocommit = True
+    # @contextmanager
+    # def transaction_context(self):
+    #     """
+    #     Provide a transactional context for multiple operations.
+    #     """
+    #     with self._database_manager.connection_context() as conn:
+    #         try:
+    #             conn.autocommit = False
+    #             yield conn
+    #             conn.commit()
+    #         except Exception as e:
+    #             conn.rollback()
+    #             raise
+    #         finally:
+    #             conn.autocommit = True
 
     def close_all_connections(self):
         """Close all connections in the pool."""
@@ -197,12 +197,15 @@ class PostgresManager:
             # Try to create a connection using the established connection method
             with self.connection_context() as conn:
                 self._logger.info("Successfully connected to database")
-                return True
+
         except psycopg2.OperationalError as e:
-            if "does not exist" in str(e):
-                self.create_database()
-            self._logger.error(f"Connection verification failed: {str(e)}")
-            raise
+            try:
+                if "does not exist" in str(e):
+                    self.create_database(self.db_config.database)
+                    self._initialize_connection_pool()
+            except Exception as e:
+                self._logger.error(f"Connection verification failed: {str(e)}")
+                raise
 
     # def _create_database(self) -> bool:
     #     """
@@ -386,11 +389,11 @@ class PostgresManager:
         """
         return URL.create(
             drivername="postgresql+psycopg2",
-            username=self.config.user,
-            password=self.config.password,
-            host=self.config.host,
-            port=self.config.port,
-            database=self.config.database
+            username=self.db_config.user,
+            password=self.db_config.password,
+            host=self.db_config.host,
+            port=self.db_config.port,
+            database=self.db_config.database
         )
 
     # Query Management Methods
@@ -660,14 +663,14 @@ class PostgresManager:
             import subprocess
             cmd = [
                 'pg_dump',
-                f'-h{self.config.host}',
-                f'-p{self.config.port}',
-                f'-U{self.config.user}',
+                f'-h{self.db_config.host}',
+                f'-p{self.db_config.port}',
+                f'-U{self.db_config.user}',
                 '-Fc',
                 f'-f{backup_path}',
-                self.config.database
+                self.db_config.database
             ]
-            env = dict(os.environ, PGPASSWORD=self.config.password)
+            env = dict(os.environ, PGPASSWORD=self.db_config.password)
             subprocess.run(cmd, env=env, check=True)
             return True
         except Exception as e:

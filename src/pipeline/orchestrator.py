@@ -182,10 +182,14 @@ class Orchestrator:
             try:
                 self.db_manager.drop_database(database_name)
             except Exception as e:
-                if force and "currently open" in str(e):
+                if "by other users" or "currently open" in str(e) and force:
+                    self._logger.info("Attempting to cleanup and retry deletion...")
+                    self.cleanup()
+                    self.db_manager.drop_database(database_name)
+                elif force and "currently open" in str(e):
                     self.cleanup()
                     # Reconnect with the default database configuration and retry deletion
-                    self.db_manager.drop_database(database_name, default_db_config)
+                    self.db_manager.drop_database(database_name)
 
     def cleanup(self):
         """Closes all PostgreSQL connections before exiting"""

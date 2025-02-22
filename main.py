@@ -8,5 +8,5 @@ if __name__ == "__main__":
     # Orchestrator().load_data()
     # print(orch.return_active_sessions({'state': 'active'}))
     # orch.terminate_sessions('postgres')
-    orch.delete_database('demo_db')
+    # orch.delete_database('demo_db')
     pass
