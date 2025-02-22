@@ -315,7 +315,7 @@ class PostgresManager:
             self._logger.error(f"Error terminating session {pid}: {str(e)}")
             return False
 
-    def execute_standalone_query(self, query: str, params: tuple = None, default_db_config: Dict = None) -> bool | None:
+    def execute_standalone_query(self, query: str, params: tuple = None, default_db_config: DatabaseConfig = None) -> bool | None:
         """
         Executes queries that require a standalone connection with autocommit.
 
@@ -355,23 +355,23 @@ class PostgresManager:
             if conn and not conn.closed:
                 conn.close()  # Close connection to prevent leaks
 
-    def create_database(self, db_name: str, default_db_config: Dict) -> bool:
+    def create_database(self, db_name: str, default_db_config: DatabaseConfig = None) -> bool:
         return self.execute_standalone_query(f"CREATE DATABASE {db_name}", default_db_config=default_db_config)
 
     def drop_database(self, db_name: str, default_db_config: DatabaseConfig = None) -> bool:
         return self.execute_standalone_query(f"DROP DATABASE {db_name}", default_db_config=default_db_config)
 
-    def create_role(self, role_name: str, password: str, default_db_config: Dict) -> bool:
+    def create_role(self, role_name: str, password: str, default_db_config: DatabaseConfig = None) -> bool:
         return self.execute_standalone_query(
             f"CREATE ROLE {role_name} WITH LOGIN PASSWORD %s",
             params=(password,),
             default_db_config=default_db_config
         )
 
-    def drop_role(self, role_name: str, default_db_config: Dict) -> bool:
+    def drop_role(self, role_name: str, default_db_config: DatabaseConfig = None) -> bool:
         return self.execute_standalone_query(f"DROP ROLE {role_name}", default_db_config=default_db_config)
 
-    def vacuum_full(self, default_db_config: Dict) -> bool:
+    def vacuum_full(self, default_db_config: DatabaseConfig = None) -> bool:
         return self.execute_standalone_query("VACUUM FULL", default_db_config=default_db_config)
 
     def create_extension(self, extension_name: str, default_db_config: DatabaseConfig) -> bool:
