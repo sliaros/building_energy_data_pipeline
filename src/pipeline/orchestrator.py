@@ -9,13 +9,14 @@ from src.logging_configuration.logging_config import setup_logging
 from src.utility.file_utils import FileUtils
 from src.schema_generator.schema_analysis_orchestrator import SchemaAnalysisManager
 from src.postgres_managing.postgres_manager import PostgresManager, DatabaseConfig
+from src.configuration_managing.config_manager import ConfigManager
 import pandas as pd
 import json
-from src.configuration_managing.config_manager import ConfigManager
+import atexit
 
 class Orchestrator:
 
-    def __init__(self):
+    def __init__(self, database_name:str = None):
         """
         Initializes the Orchestrator object.
 
@@ -34,6 +35,15 @@ class Orchestrator:
         self._logger = logging.getLogger(self.__class__.__name__)
 
         self._logger.info("Orchestrator started")
+
+        if not database_name:
+            self._logger.info("No database selected, reverting to default database")
+
+        db_config = DatabaseConfig(**self.config_manager.get(database_name, default="default_database"))
+
+        self.db_manager = PostgresManager(db_config)
+
+        atexit.register(self.cleanup)
 
     def load_config(self, config_files: list[str] = []):
         """Reloads the configuration if needed."""
@@ -124,11 +134,6 @@ class Orchestrator:
                     unique_columns=self._config['project_data']['unique_columns'][_table_name]
                 )
 
-    def connect_to_default_database(self):
-        """Establish a connection to the default database."""
-        config = self._config['default_database']
-        return PostgresManager(DatabaseConfig(**config))
-
     def return_active_sessions(self, filters=None):
         """
         Retrieve active sessions with optional filtering and return JSON.
@@ -139,8 +144,7 @@ class Orchestrator:
         Returns:
             str: JSON string of active sessions.
         """
-        pgm = self.connect_to_default_database()
-        sessions = pgm.get_active_sessions(filters)
+        sessions = self.db_manager.get_active_sessions(filters)
         return json.dumps(sessions, default=str, indent=4)
 
     def terminate_sessions(self, datname, state=None):
@@ -151,17 +155,43 @@ class Orchestrator:
             datname (str): Database name.
             state (str, optional): Session state to filter by (e.g., "active", "idle").
         """
-        pgm = self.connect_to_default_database()
         filters = {"datname": datname}
         if state:
             filters["state"] = state
 
-        active_sessions = json.loads(self.return_active_sessions(filters))
+        sessions = self.db_manager.get_active_sessions(filters)
 
-        for session in active_sessions:
-            pgm.terminate_session_by_pid(session["pid"])
+        for session in sessions:
+            self.db_manager.terminate_session_by_pid(session["pid"])
 
-    def delete_database(self, database_name):
-        """Drop a PostgreSQL database."""
-        pgm = self.connect_to_default_database()
-        pgm.drop_database(database_name)
+    def delete_database(self, database_name: str, force: bool = True) -> None:
+        """Drop a PostgreSQL database.
+
+        Args:
+            database_name: The name of the database to delete.
+            force: If True, attempts to reconnect and retry deletion if the database is currently open.
+
+        Raises:
+            ValueError: If attempting to delete the default database.
+        """
+        current_db = self.db_manager.config.database
+        default_database = self.config['default_database']['database']
+
+        if database_name==default_database:
+            raise ValueError("Cannot delete the default database.")
+
+        try:
+            self.db_manager.drop_database(database_name)
+        except Exception as e:
+            if force and "currently open" in str(e):
+                self.cleanup()
+                # Reconnect with the default database configuration and retry deletion
+                default_db_config = DatabaseConfig(**self.config_manager.get(None, default="default_database"))
+                default_db_manager = PostgresManager.create_temporary_instance(default_db_config)
+
+                default_db_manager.drop_database(database_name)
+                default_db_manager.close_all_connections()
+
+    def cleanup(self):
+        """Closes all PostgreSQL connections before exiting"""
+        self.db_manager.close_all_connections()

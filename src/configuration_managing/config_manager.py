@@ -50,12 +50,34 @@ class ConfigManager:
                 self._logger.warning(f"Config file {file} not found. Skipping.")
 
     def get(self, key: str, default=None):
-        """Retrieves a configuration value safely."""
-        keys = key.split(".")
-        value = self.config
-        for k in keys:
-            value = value.get(k, {})
-        return value if value else default
+        """Retrieves a configuration value safely.
+
+        Args:
+            key: The configuration key to retrieve, optionally using dot notation for nested keys.
+            default: The default value to return if the key is not found.
+
+        Returns:
+            The configuration value or the default value if the key is not found.
+
+        Raises:
+            AttributeError: If there is an error accessing the configuration.
+        """
+        try:
+            if not key:
+                return self.config.get(default)
+
+            keys = key.split(".")
+            value = self.config
+            for k in keys:
+                value = value.get(k)
+                if value is None:
+                    return self.config.get(default)
+
+            return value
+        except AttributeError as e:
+            self._logger.error(f"Error accessing configuration key {key or default}: {e}")
+            raise
+
 
     def validate_config(self):
         """Validate essential configuration keys."""

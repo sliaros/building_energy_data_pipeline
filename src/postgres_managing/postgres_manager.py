@@ -15,6 +15,8 @@ from src.logging_configuration.logging_config import setup_logging
 from functools import lru_cache, wraps
 from pathlib import Path
 from sqlalchemy.engine.url import URL
+import threading
+from src.configuration_managing.config_manager import ConfigManager
 
 @dataclass
 class DatabaseConfig:
@@ -56,19 +58,45 @@ def configure_connection(func):
     return wrapper
 
 class PostgresManager:
-    def __init__(self, config: DatabaseConfig):
+    _instance = None
+    _lock = threading.Lock()
+
+    def __new__(cls, config: DatabaseConfig, temporary=False):
+        """Ensure only one singleton instance unless explicitly creating a temporary instance"""
+        if temporary:
+            instance = super(PostgresManager, cls).__new__(cls)
+            instance._is_temporary = True
+            return instance
+
+        with cls._lock:
+            if cls._instance is None:
+                cls._instance = super(PostgresManager, cls).__new__(cls)
+                cls._instance._is_temporary = False
+        return cls._instance
+
+    def __init__(self, config: DatabaseConfig, temporary=False):
+        """Initialize connection pool only once for Singleton, always for temporary instances"""
+        # Skip re-initialization only for non-temporary singleton
+        if hasattr(self, "_initialized") and self._initialized and not getattr(self, "_is_temporary", False):
+            return
+
         self.config = config
         self._logger = config.logger or logging.getLogger(self.__class__.__name__)
+        self._pool = None
+        self._initialized = True
+        self._is_temporary = getattr(self, "_is_temporary", False)
 
-        if not self._logger.hasHandlers():
-            setup_logging(
-                log_file='C:\\slPrivateData\\00_portfolio\\building_energy_data_pipeline\\logs\\application.log')
-
-        # self._connection_pool = []
-        # self._pool_lock = threading.Lock()
-        self.verify_connection()
         self.query_history = []
         self.max_query_history = 1000
+
+        # Only verify connection for non-temporary instances or when explicitly initializing
+        if not self._is_temporary or temporary:
+            self.verify_connection_with_database()
+
+    @classmethod
+    def create_temporary_instance(cls, temp_config: DatabaseConfig):
+        """Create a temporary instance for switching databases"""
+        return cls(temp_config, temporary=True)  # 'temporary' is handled only in __new__()
 
     @backoff.on_exception(
         backoff.expo,
@@ -80,16 +108,18 @@ class PostgresManager:
     )
     def _initialize_connection_pool(self) -> None:
         """Initialize the PostgreSQL connection pool."""
-        self._pool = pool.SimpleConnectionPool(
-            minconn=self.config.min_connections,
-            maxconn=self.config.max_connections,
-            host=self.config.host,
-            port=self.config.port,
-            database=self.config.database,
-            user=self.config.user,
-            password=self.config.password,
-            sslmode=self.config.ssl_mode if self.config.enable_ssl else 'disable'
-        )
+        if not self._pool:
+            self._pool = pool.SimpleConnectionPool(
+                minconn=self.config.min_connections,
+                maxconn=self.config.max_connections,
+                host=self.config.host,
+                port=self.config.port,
+                database=self.config.database,
+                user=self.config.user,
+                password=self.config.password,
+                sslmode=self.config.ssl_mode if self.config.enable_ssl else 'disable'
+            )
+            self._logger.info(f"{self.config.database}: Initialized PostgreSQL connection pool [{self.config.host}:{self.config.port}]")
 
     @configure_connection
     @backoff.on_exception(
@@ -151,9 +181,11 @@ class PostgresManager:
     def close_all_connections(self):
         """Close all connections in the pool."""
         if self._pool:
-            self._pool.closeall()
+            if not self._pool.closed:
+                self._pool.closeall()
+                self._logger.info("Closed all PostgreSQL connections")
 
-    def verify_connection(self) -> bool:
+    def verify_connection_with_database(self) -> bool:
         """
         Verify and create database if it doesn't exist.
 
@@ -302,9 +334,10 @@ class PostgresManager:
         Returns:
             bool: True if the database was dropped successfully, False otherwise.
         """
-        query = f"DROP DATABASE {database_name}"  # Enable autocommit
+        DatabaseConfig(**self.config_manager.get(None, default="default_database"))
 
-        self.close_all_connections()
+        query = f"DROP DATABASE {database_name}"
+
         conn = psycopg2.connect(
             host=self.config.host,
             port=self.config.port,
@@ -321,11 +354,10 @@ class PostgresManager:
                 with conn.cursor() as cur:
                     cur.execute(query)
                 self._logger.info(f"Database {database_name} dropped successfully")
-                return True
 
         except Exception as e:
                 self._logger.error(f"Failed to drop database {database_name}: {str(e)}")
-                return False
+                raise
 
         finally:
                 if conn and not conn.closed:

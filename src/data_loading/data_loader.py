@@ -84,7 +84,7 @@ class PostgresDataLoader(BaseDataLoader):
 
             self._database_manager = PostgresManager(self._db_config)
 
-            if not self._database_manager.verify_connection():
+            if not self._database_manager.verify_connection_with_database():
                 raise Exception(f"Failed to connect to or create database {self._db_config.database}")
 
             self._sqlalchemy_url = self._database_manager.postgres_params_to_sqlalchemy_url()

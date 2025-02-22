@@ -42,3 +42,10 @@ default_database:
   user: "postgres"
   password: "postgres"
 
+demo_database:
+  host: "localhost"
+  port: 5432
+  database: "demo_db"
+  user: "postgres"
+  password: "postgres"
+
