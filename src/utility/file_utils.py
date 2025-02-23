@@ -164,11 +164,11 @@ class FileUtils:
         """Ensure that the directory for a given path exists."""
         os.makedirs(os.path.dirname(path), exist_ok=True)
 
-    def save_parquet(self, df: pd.DataFrame, path: str) -> None:
+    @staticmethod
+    def save_parquet(df: pd.DataFrame, path: str) -> None:
         """Save DataFrame as a Parquet file."""
         FileUtils.ensure_directory_exists(path)
         df.to_parquet(path, index=False)
-        self._logger.info(f"{path} created")
 
     @staticmethod
     def save_csv(df: pd.DataFrame, path: str, mode: str = 'w', header: bool = True) -> None:
@@ -284,6 +284,36 @@ class FileUtils:
             self._logger.warning(f"No file folders detected in root folder {root_folder} containing files with extension {extension}")
             return file_folders
 
+    @staticmethod
+    def create_directories_from_yaml(yaml_content, base_path='.'):
+        """
+        Create directories as specified in a YAML content string and add an __init__.py.py file to each.
+
+        Args:
+            yaml_content (str): YAML string defining the directory structure.
+            base_path (str): The base directory where the structure will be created. Defaults to the current directory.
+        """
+
+        def _create_dirs(structure, current_path):
+            if isinstance(structure, dict):
+                for key, value in structure.items():
+                    new_path = os.path.join(current_path, key)
+                    os.makedirs(new_path, exist_ok=True)
+                    if "src" in new_path:
+                        init_file_path = os.path.join(new_path, '__init__.py')
+                        if not os.path.exists(init_file_path):
+                            with open(init_file_path, 'w') as init_file:
+                                init_file.write('# This file makes this directory a Python package\n')
+
+                    _create_dirs(value, new_path)
+            # else:
+            #     print(f"Expected a dictionary but got {type(structure).__name__} at {current_path}")
+
+        try:
+            _create_dirs(yaml_content, base_path)
+        except yaml.YAMLError as exc:
+            print(f"Error parsing YAML content: {exc}")
+
     class FileReader:
         """Handles file type detection and corresponding reader selection."""
 
@@ -323,3 +353,4 @@ class FileUtils:
                 return suffix.lstrip('.'), getattr(cls, reader) if isinstance(reader, str) else reader
 
             raise ValueError(f"Unsupported file type: {suffix}")
+

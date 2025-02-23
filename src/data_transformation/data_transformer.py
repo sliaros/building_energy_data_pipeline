@@ -6,13 +6,13 @@ from pathlib import Path
 from typing import List, Optional, Callable
 from src.utility.file_utils import FileUtils
 from glob import glob
+import logging
 
 class DataTransformer:
-    def __init__(self, config, logger, file_utils):
+    def __init__(self, config):
         self._config = config
-        self._logger = logger
+        self._logger = logging.getLogger(self.__class__.__name__)
         self._logger.info('Data Transformer initiated')
-        self._file_utils = file_utils
 
     def convert_parquet_to_csv(self,
             parquet_path: str, output_path: str, chunk_size: int = 100000, include_header: bool = True
@@ -87,7 +87,7 @@ class DataTransformer:
         """Saves a processed chunk as a Parquet file."""
         temp_file_name = f"{meter_type}_chunk_{chunk_num}.parquet"
         temp_file = os.path.join(output_path, temp_file_name)
-        self._file_utils.save_parquet(chunk, temp_file)
+        FileUtils.save_parquet(chunk, temp_file)
         return temp_file
 
     def _process_file(
@@ -114,7 +114,7 @@ class DataTransformer:
         """Combines all chunked Parquet files into one and removes temporary files."""
         combined_data = pd.concat([pd.read_parquet(f) for f in temp_files], ignore_index=True)
         final_parquet_path = os.path.join(output_path, f"{os.path.basename(os.path.normpath(output_path))}.parquet")
-        self._file_utils.save_parquet(combined_data, final_parquet_path)
+        FileUtils.save_parquet(combined_data, final_parquet_path)
 
         # Remove temporary files
         for temp_file in temp_files:

@@ -14,7 +14,6 @@ import csv
 from src.schema_generator.sampling_strategies import BaseSamplingStrategy, RandomSamplingStrategy
 import json
 from src.utility.file_utils import FileUtils
-from src.logging_configuration.logging_config import setup_logging
 import logging
 from src.postgres_managing.postgres_manager import PostgresManager, DatabaseConfig
 from abc import ABC, abstractmethod
@@ -51,27 +50,17 @@ class PostgresDataLoader(BaseDataLoader):
     def __init__(
                 self,
                 config: Dict,
-                logger,
-                file_utils,
                 max_workers: int = 4,
                 max_retries: int = 3,
-                # retry_delay: float = 1.0,
                 db_type: str = "staging",
                 db_params: Optional[Dict] = None,
                 sampling_strategy: Optional[BaseSamplingStrategy] = None
         ):
             self._config = config
-            self._logger = logger or logging.getLogger(self.__class__.__name__)
-
-            if not self._logger.hasHandlers():
-                setup_logging(
-                    log_file='C:\\slPrivateData\\00_portfolio\\building_energy_data_pipeline\\logs\\application.log')
-
-            self._file_utils = file_utils
+            self._logger = logging.getLogger(self.__class__.__name__)
 
             self._max_workers = max_workers
             self._max_retries = max_retries
-            # self._retry_delay = retry_delay
 
             self._db_params = self._get_db_params(db_type, db_params)
             self._db_config = DatabaseConfig(
@@ -84,8 +73,7 @@ class PostgresDataLoader(BaseDataLoader):
 
             self._database_manager = PostgresManager(self._db_config)
 
-            if not self._database_manager.verify_connection_with_database():
-                raise Exception(f"Failed to connect to or create database {self._db_config.database}")
+            self._database_manager.verify_connection_with_database()
 
             self._sqlalchemy_url = self._database_manager.postgres_params_to_sqlalchemy_url()
 

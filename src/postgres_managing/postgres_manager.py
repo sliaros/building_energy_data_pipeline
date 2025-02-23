@@ -207,45 +207,6 @@ class PostgresManager:
                 self._logger.error(f"Connection verification failed: {str(e)}")
                 raise
 
-    # def _create_database(self) -> bool:
-    #     """
-    #     Create a new database if it doesn't exist.
-    #
-    #     Returns:
-    #         bool: Database creation status
-    #     """
-    #     # Create a modified configuration for connecting to 'postgres' database
-    #     temp_config = self.default_db_config
-    #
-    #     try:
-    #         # Create connection to postgres database with autocommit mode
-    #         conn = psycopg2.connect(
-    #             host=temp_config.host,
-    #             port=temp_config.port,
-    #             database=temp_config.database,
-    #             user=temp_config.user,
-    #             password=temp_config.password,
-    #             application_name=temp_config.application_name,
-    #             connect_timeout=temp_config.connection_timeout,
-    #             sslmode=temp_config.ssl_mode if temp_config.enable_ssl else 'disable'
-    #         )
-    #         conn.autocommit = True  # Enable autocommit
-    #     except Exception as e:
-    #         self._logger.error(f"Failed to connect to 'postgres' database: {str(e)}")
-    #         raise
-    #
-    #         try:
-    #             with conn.cursor() as cur:
-    #                 cur.execute(f"CREATE DATABASE {self.config.database}")
-    #                 self._logger.info(f"Created database {self.config.database}")
-    #         finally:
-    #                 if conn and not conn.closed:
-    #                     conn.close()
-    #
-    #     except Exception as e:
-    #         self._logger.error(f"Database creation failed: {str(e)}")
-    #         raise
-
     def get_active_sessions(self, filters: Optional[Dict[str, str]] = None) -> List[Dict]:
         """
         Retrieves active PostgreSQL sessions with optional filtering.

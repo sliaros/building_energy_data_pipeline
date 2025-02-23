@@ -2,6 +2,7 @@ import yaml
 import logging
 from typing import Dict, Any
 from pathlib import Path
+from src.logging_configuration.logging_config import setup_logging
 
 class ConfigManager:
     """Centralized configuration manager for handling YAML-based settings."""
@@ -14,6 +15,7 @@ class ConfigManager:
             config_files (list): List of configuration file names.
             base_path (str): The directory where configuration files are stored.
         """
+        setup_logging()
         self._logger = logging.getLogger(self.__class__.__name__)
         self.base_path = Path(base_path)
         self.config = {}
@@ -79,7 +81,7 @@ class ConfigManager:
 
     def validate_config(self):
         """Validate essential configuration keys."""
-        required_keys = ["logging.log_file_path", "default_database"]
+        required_keys = ["ssl", "default_database", "project_data"]
         try:
             for key in required_keys:
                 if not self.get(key):

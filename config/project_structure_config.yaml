@@ -1,5 +1,5 @@
 # Root folder for the building energy data pipeline project
-# building_energy_data_pipeline:
+project_structure:
   # Folder containing all data sources, both raw and processed
   data_sources:
     # Raw data folder: Contains unprocessed data directly from sources
@@ -22,17 +22,17 @@
     pipeline:
     # Utility scripts: Tools for utility functions and helper classes
     utility:
-    # Describe
+    # Postgres managing
     postgres_managing:
-    # Describe
+    # Schema generator
     schema_generator:
-    # Describe
+    # Configuration
     configuration_managing:
-    # Describe
+    # Logging
     logging_configuration:
   # Configuration folder: Contains settings and parameters for the pipeline
   config:
-  # Logs folder: Contains log files for tracking pipeline execution
-  logs:
   # Tests folder: Contains unit and integration tests for the pipeline
   tests:
+  # Jupyter notebooks: Contains Jupyter notebooks for data exploration and analysis
+  notebooks:

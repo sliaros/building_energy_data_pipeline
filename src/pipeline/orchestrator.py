@@ -29,9 +29,8 @@ class Orchestrator:
         "./config")
         self.config = self.config_manager.config  # Store config for easy access
         self.config_manager.validate_config()
-        self._create_directories_from_yaml(self.config.get("project_structure", {}))
+        self.create_folder_structure()
 
-        setup_logging(log_file=self.config_manager.get("logging.log_file_path"))
         self._logger = logging.getLogger(self.__class__.__name__)
 
         self._logger.info("Orchestrator started")
@@ -52,35 +51,8 @@ class Orchestrator:
         self.config_manager.validate_config()
         self._logger.info("Configuration reloaded successfully")
 
-    @staticmethod
-    def _create_directories_from_yaml(yaml_content, base_path='.'):
-        """
-        Create directories as specified in a YAML content string and add an __init__.py.py file to each.
-
-        Args:
-            yaml_content (str): YAML string defining the directory structure.
-            base_path (str): The base directory where the structure will be created. Defaults to the current directory.
-        """
-
-        def _create_dirs(structure, current_path):
-            if isinstance(structure, dict):
-                for key, value in structure.items():
-                    new_path = os.path.join(current_path, key)
-                    os.makedirs(new_path, exist_ok=True)
-                    if "src" in new_path:
-                        init_file_path = os.path.join(new_path, '__init__.py')
-                        if not os.path.exists(init_file_path):
-                            with open(init_file_path, 'w') as init_file:
-                                init_file.write('# This file makes this directory a Python package\n')
-
-                    _create_dirs(value, new_path)
-            # else:
-            #     print(f"Expected a dictionary but got {type(structure).__name__} at {current_path}")
-
-        try:
-            _create_dirs(yaml_content, base_path)
-        except yaml.YAMLError as exc:
-            print(f"Error parsing YAML content: {exc}")
+    def create_folder_structure(self):
+        FileUtils.create_directories_from_yaml(self.config.get("project_structure", {}))
 
     def _load_config(self) -> Dict[str, Any]:
         """Load configuration from YAML file"""
@@ -91,49 +63,6 @@ class Orchestrator:
         except Exception as e:
             self._logger.error(f"Failed to load configuration: {e}")
             raise
-
-    def retrieve_data(self):
-        _data_retriever = DataExtractor(self._config)
-        _data_retriever._download_data_from_zenodo()
-        _data_retriever._unzip_downloaded_data()
-
-    def transform_data(self):
-        DataTransformer(self._config, self._logger, FileUtils()).process_and_convert_to_parquet_in_chunks()
-
-    def read_parquet_info(self):
-        for folder, files in FileUtils().find_folders_with_extension('data_sources','parquet').items():
-            for _file in files:
-                DataTransformer(self._config, self._logger, FileUtils()).get_parquet_info(_file)
-                print(pd.read_parquet(_file).head())
-
-    def load_data(self):
-
-        loader = PostgresDataLoader(self._config, self._logger, FileUtils())
-        schema_manager = SchemaAnalysisManager(config=self._config, logger=self._logger)
-
-        for folder, files in FileUtils().find_folders_with_extension('data_sources','parquet').items():
-            for _file in files:
-
-                # Generate schema with custom table name and output location
-                _result = schema_manager.generate_schema(
-                    file_path=_file,
-                    table_name=None,
-                    output_folder=None,
-                    if_exists="fail"
-                )
-
-                _table_name, _scema_file = _result['table_name'], _result['schema_file_path']
-
-                loader.create_table(_scema_file,
-                    _table_name,
-                if_exists='fail')
-
-                loader.load_data(
-                    _file,
-                    _table_name,
-                    chunk_size=500000,
-                    unique_columns=self._config['project_data']['unique_columns'][_table_name]
-                )
 
     def return_active_sessions(self, filters=None):
         """
@@ -194,3 +123,46 @@ class Orchestrator:
     def cleanup(self):
         """Closes all PostgreSQL connections before exiting"""
         self.db_manager.close_all_connections()
+
+    def retrieve_data(self):
+        data_retriever = DataExtractor(self.config)
+        data_retriever.download_data_from_zenodo()
+        data_retriever.unzip_downloaded_data()
+
+    def transform_data(self):
+        DataTransformer(self.config).process_and_convert_to_parquet_in_chunks()
+
+    def read_parquet_info(self):
+        for folder, files in FileUtils().find_folders_with_extension('data_sources','parquet').items():
+            for _file in files:
+                DataTransformer(self.config).get_parquet_info(_file)
+                print(pd.read_parquet(_file).head())
+
+    def load_data(self):
+
+        loader = PostgresDataLoader(self.config)
+        schema_manager = SchemaAnalysisManager(config=self.config, logger=self._logger)
+
+        for folder, files in FileUtils().find_folders_with_extension('data_sources','parquet').items():
+            for _file in files:
+
+                # Generate schema with custom table name and output location
+                _result = schema_manager.generate_schema(
+                    file_path=_file,
+                    table_name=None,
+                    output_folder=None,
+                    if_exists="fail"
+                )
+
+                _table_name, _scema_file = _result['table_name'], _result['schema_file_path']
+
+                loader.create_table(_scema_file,
+                    _table_name,
+                if_exists='fail')
+
+                loader.load_data(
+                    _file,
+                    _table_name,
+                    chunk_size=500000,
+                    unique_columns=self.config['project_data']['unique_columns'][_table_name]
+                )
