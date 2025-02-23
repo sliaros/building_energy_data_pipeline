@@ -138,7 +138,7 @@ class Orchestrator:
 
     def load_data(self):
 
-        loader = PostgresDataLoader(self.config)
+        loader = PostgresDataLoader(self.db_manager)
         schema_manager = SchemaAnalysisManager(config=self.config, logger=self._logger)
 
         for folder, files in FileUtils().find_folders_with_extension('data_sources','parquet').items():

@@ -49,11 +49,9 @@ class PostgresDataLoader(BaseDataLoader):
     """
     def __init__(
                 self,
-                config: Dict[str, Any],
+                db_manager: PostgresManager,
                 max_workers: int = 4,
                 max_retries: int = 3,
-                db_type: str = "staging",
-                db_params: Optional[Dict[str, Any]] = None,
                 sampling_strategy: Optional[BaseSamplingStrategy] = None
         ) -> None:
             """
@@ -71,9 +69,6 @@ class PostgresDataLoader(BaseDataLoader):
                 None
             """
 
-            # Store the configuration in an instance variable
-            self._config = config
-
             # Create a logger for this class
             self._logger = logging.getLogger(self.__class__.__name__)
 
@@ -83,23 +78,8 @@ class PostgresDataLoader(BaseDataLoader):
             # Set the maximum number of retries for failed database operations
             self._max_retries = max_retries
 
-            # Get the database connection parameters based on the db_type
-            self._db_params = self._get_db_params(db_type, db_params)
-
-            # Create a DatabaseConfig object from the database connection parameters
-            self._db_config = DatabaseConfig(
-                                    host=self._db_params['host'],
-                                    port=self._db_params['port'],
-                                    database=self._db_params['database'],
-                                    user=self._db_params['user'],
-                                    password=self._db_params['password']
-                                )
-
             # Create a PostgresManager object with the database configuration
-            self._database_manager = PostgresManager(self._db_config)
-
-            # Verify the connection to the database
-            self._database_manager.verify_connection_with_database()
+            self._database_manager = db_manager
 
             # Create a SQLAlchemy URL from the database connection parameters
             self._sqlalchemy_url = self._database_manager.postgres_params_to_sqlalchemy_url()
@@ -150,22 +130,6 @@ class PostgresDataLoader(BaseDataLoader):
                     f"Failed to close all connections in the pool: {e}"
                 )
 
-    def _get_db_params(self, db_type: str, db_params: Optional[Dict]) -> Dict:
-        """
-        Retrieve database parameters based on type.
-
-        Args:
-            db_type: Type of database configuration
-            db_params: Optional custom parameters
-
-        Returns:
-            Database connection parameters
-        """
-        return db_params or (
-            self._config['staging_database'] if db_type=="staging"
-            else self._config['database']
-        )
-
     def load_data(
             self,
             file_path: Union[str, Path],
@@ -181,11 +145,26 @@ class PostgresDataLoader(BaseDataLoader):
             table_name: Target table name
             chunk_size: Number of rows per chunk
             unique_columns: List of columns that form the unique constraint
+
+        Returns:
+            A dictionary containing statistics about the loading process, including
+                - total_rows_loaded: The total number of rows loaded into the database
+                - total_duration: The total time taken to complete the loading process
+                - chunks_total: The total number of chunks processed
+                - chunks_successful: The number of chunks that were successfully processed
+                - chunks_failed: The number of chunks that failed to be processed
+                - rows_per_second: The number of rows loaded per second
         """
         start_time = time.time()
         file_path = Path(file_path)
         total_rows_loaded = 0
         chunk_statuses: List[Dict] = []
+
+        if not file_path.exists():
+            raise FileNotFoundError(f"File not found: {file_path}")
+
+        if not file_path.is_file():
+            raise ValueError(f"Expected a file, not a directory: {file_path}")
 
         # Determine file type and get appropriate reader
         file_type, reader_func = FileUtils.FileReader.get_file_type_and_reader(file_path)
@@ -221,6 +200,7 @@ class PostgresDataLoader(BaseDataLoader):
                         end_idx = min((i + 1) * chunk_size, total_rows)
                         chunk = df.iloc[start_idx:end_idx]
 
+                        # Submit a task to process the chunk
                         future = executor.submit(
                             self._process_chunk_with_retry,
                             chunk,
@@ -232,11 +212,15 @@ class PostgresDataLoader(BaseDataLoader):
                     # Process completed futures
                     for future, chunk_info in futures:
                         try:
+                            # Get the result of the task
                             result = future.result()
+                            # Process the result
                             self._process_chunk_result(chunk_info, result, chunk_statuses,
                                 total_rows_loaded, chunk_pbar, rows_pbar)
+                            # Update the total number of rows loaded
                             total_rows_loaded += chunk_info['rows']
                         except Exception as e:
+                            # Handle any exceptions that occur while processing the chunk
                             self._handle_chunk_error(chunk_info, e, chunk_statuses)
 
             else:  # CSV file
@@ -248,6 +232,7 @@ class PostgresDataLoader(BaseDataLoader):
                     futures = []
 
                     for i, chunk in enumerate(reader_func(file_path, chunksize=chunk_size)):
+                        # Submit a task to process the chunk
                         future = executor.submit(
                             self._process_chunk_with_retry,
                             chunk,
@@ -259,11 +244,15 @@ class PostgresDataLoader(BaseDataLoader):
                     # Process completed futures
                     for future, chunk_info in futures:
                         try:
+                            # Get the result of the task
                             result = future.result()
+                            # Process the result
                             self._process_chunk_result(chunk_info, result, chunk_statuses,
                                 total_rows_loaded, chunk_pbar, rows_pbar)
+                            # Update the total number of rows loaded
                             total_rows_loaded += chunk_info['rows']
                         except Exception as e:
+                            # Handle any exceptions that occur while processing the chunk
                             self._handle_chunk_error(chunk_info, e, chunk_statuses)
 
             # After all chunks are processed, merge data to final table
@@ -273,7 +262,6 @@ class PostgresDataLoader(BaseDataLoader):
             # Cleanup
             chunk_pbar.close()
             rows_pbar.close()
-            print(staging_table)
             self._cleanup_staging(staging_table)
 
         # Calculate and log final statistics
@@ -283,15 +271,34 @@ class PostgresDataLoader(BaseDataLoader):
         return stats
 
     def _create_staging_table(self, source_table: str, staging_table: str):
-        """Create a staging table without indexes using a single transaction."""
+        """
+        Create a staging table based on the structure of the source table,
+        without any indexes, in a single transaction.
+
+        This is an optimization to speed up the data loading process. By
+        creating the staging table without indexes, we can avoid the extra
+        overhead of index maintenance during the data load process. We also
+        set the table to be UNLOGGED, which means that it won't be included in
+        any backups and won't take up space in the write-ahead log.
+
+        Args:
+            source_table: Name of the table to use as a template for the staging table
+            staging_table: Name of the staging table to create
+        """
         query = f"""
+            -- Create a new table with the same structure as the source table
             CREATE UNLOGGED TABLE {staging_table} (LIKE {source_table});
+
+            -- Set the table to be UNLOGGED, which means it won't be included in
+            -- any backups and won't take up space in the write-ahead log.
             ALTER TABLE {staging_table} SET UNLOGGED;
         """
         try:
+            # Execute the query as a single transaction
             self._database_manager.execute_query(query, fetch_all=False)
             self._logger.info(f"Created staging table: {staging_table}")
         except Exception as e:
+            # If anything goes wrong, log the error and raise the exception
             self._logger.error(f"Failed to create staging table {staging_table}: {e}")
             raise
 
@@ -329,31 +336,44 @@ class PostgresDataLoader(BaseDataLoader):
         Common function to check for overlaps across all table types.
         Handles both time series data (raw, weather) and metadata.
         """
-        if target_table=='metadata':
+        if target_table == 'metadata':
             return self._check_metadata_overlap(df)
 
         # For time series data (raw and weather)
         try:
+            # Get the minimum and maximum timestamps from the dataframe
             min_time = pd.to_datetime(df['timestamp'].min())
             max_time = pd.to_datetime(df['timestamp'].max())
 
-            # Get entity IDs based on table type
-            if target_table=='raw':
-                entities = list(df['building_id'].unique())  # Changed to list
-                meters = list(df['meter'].unique())  # Changed to list
+            # Get the entity IDs based on the table type
+            if target_table == 'raw':
+                # Get the unique building IDs from the dataframe
+                entities = list(df['building_id'].unique())
+                # Get the unique meter IDs from the dataframe
+                meters = list(df['meter'].unique())
+                # Set the entity column to 'building_id'
                 entity_column = 'building_id'
+                # Set the additional condition to include the meter column
                 additional_conditions = 'AND r.meter = ANY(%s::varchar[])'
+                # Set the table alias to 'r'
                 table_alias = 'r'
             else:  # weather
-                entities = list(df['site_id'].unique())  # Changed to list
+                # Get the unique site IDs from the dataframe
+                entities = list(df['site_id'].unique())
+                # Set the entity column to 'site_id'
                 entity_column = 'site_id'
+                # Set the additional condition to an empty string
                 additional_conditions = ''
+                # Set the table alias to 'w'
                 table_alias = 'w'
+                # Set the meters to None
                 meters = None
 
         except KeyError as e:
+            # Raise a ValueError if any required columns are missing
             raise ValueError(f"Missing required column: {e}")
 
+        # Construct a query to check for overlaps
         query = f"""
         WITH file_bounds AS (
             SELECT 
@@ -408,9 +428,9 @@ class PostgresDataLoader(BaseDataLoader):
             END as overlap_details
         """
 
-        # Prepare query parameters
+        # Prepare the query parameters
         params = [min_time, max_time]
-        # Add entities for each condition
+        # Add the entities for each condition
         for _ in range(5):  # We use entities 5 times in the query
             params.append(entities)
             if meters is not None:
@@ -418,8 +438,10 @@ class PostgresDataLoader(BaseDataLoader):
 
         # Execute the query using execute_query
         result = self._database_manager.execute_query(query, params=tuple(params), fetch_all=False)
+        # Get the result of the query
         has_overlap, overlap_details = result['has_overlap'], result['overlap_details']
 
+        # If there is no overlap, return a dictionary with the appropriate values
         if not has_overlap:
             return {
                 'has_overlap': False,
@@ -428,8 +450,9 @@ class PostgresDataLoader(BaseDataLoader):
                 'affected_entities': []
             }
 
+        # If there is an overlap, parse the overlap details and return a dictionary
         details = json.loads(overlap_details)
-        entity_type = 'building(s)' if target_table=='raw' else 'site(s)'
+        entity_type = 'building(s)' if target_table == 'raw' else 'site(s)'
 
         return {
             'has_overlap': True,
@@ -445,19 +468,30 @@ class PostgresDataLoader(BaseDataLoader):
         }
 
     def _check_metadata_overlap(self, df: pd.DataFrame) -> Dict[str, Any]:
-        """Check for overlapping building metadata."""
+        """Check for overlapping building metadata in the `metadata` table.
+
+        This function takes a DataFrame with a 'building_id' column and checks if any of the buildings
+        in the DataFrame already have metadata in the database. If there is an overlap, it returns a
+        dictionary with details about the overlap, including the affected buildings and a message.
+        If there is no overlap, it returns a dictionary with the appropriate values set to None or [].
+        """
         try:
+            # Get a list of unique building IDs from the DataFrame
             buildings = list(df['building_id'].unique())  # Changed to list
         except KeyError as e:
+            # Raise a ValueError if the DataFrame doesn't have a 'building_id' column
             raise ValueError(f"Missing required column: {e}")
 
+        # Construct a query to check for overlapping buildings in the metadata table
         query = """
         SELECT 
+            -- Check if any of the buildings in the DataFrame already exist in the metadata table
             EXISTS(
                 SELECT 1 
                 FROM metadata m
                 WHERE m.building_id = ANY(%s::varchar[])
             ) as has_overlap,
+            -- If there is an overlap, get a list of the existing building IDs
             CASE WHEN EXISTS(
                 SELECT 1 
                 FROM metadata m
@@ -470,9 +504,13 @@ class PostgresDataLoader(BaseDataLoader):
                 NULL
             END as existing_buildings
         """
+
+        # Execute the query using execute_query
         result = self._database_manager.execute_query(query, params=(buildings, buildings, buildings), fetch_all=False)
+        # Get the result of the query
         has_overlap, existing_buildings = result['has_overlap'], result['existing_buildings']
 
+        # If there is no overlap, return a dictionary with the appropriate values
         if not has_overlap:
             return {
                 'has_overlap': False,
@@ -481,6 +519,7 @@ class PostgresDataLoader(BaseDataLoader):
                 'affected_entities': []
             }
 
+        # If there is an overlap, parse the existing building IDs and return a dictionary
         existing = json.loads(existing_buildings)
         return {
             'has_overlap': True,
@@ -495,17 +534,51 @@ class PostgresDataLoader(BaseDataLoader):
             staging_table: str,
             chunk_index: int
     ) -> Dict[str, float] | None:
-        """Process a single chunk with retries using COPY command."""
+        """
+        Process a single chunk with retries using COPY command.
 
-        # Convert numeric columns with proper integer handling
+        This function does the following:
+        1. Converts numeric columns with proper integer handling by converting to numeric, rounding, and converting to Int64.
+        2. Writes the chunk to a temporary CSV file.
+        3. Copies the data from the temporary file to the staging table using psycopg2 connection.
+        4. Commits the transaction.
+        5. Removes the temporary file.
+
+        If any of these steps fail, the function will retry up to _max_retries times with exponential backoff.
+        """
+
+        # Define a helper function to convert numeric columns with proper integer handling
         def convert_to_numeric_int64(column: pd.Series) -> pd.Series:
+            """
+            Converts numeric columns with proper integer handling.
+
+            Parameters:
+                column (pd.Series): The input Series.
+
+            Returns:
+                pd.Series: The converted Series.
+            """
             # First convert to numeric, coercing errors to NaN
+            # This is necessary because `pd.to_numeric` will raise a ValueError
+            # if the column contains non-numeric values.
+            # We use `errors="coerce"` to convert non-numeric values to NaN.
             numeric_series = pd.to_numeric(column, errors="coerce")
             # For integer columns, round and convert to integers
+            # This is because the database will not accept decimal values
+            # for integer columns.
+            # We use `round` to round the values to the nearest integer,
+            # and `astype('Int64', errors='ignore')` to convert the values
+            # to integers.
+            # The `errors='ignore'` parameter is used to ignore any errors
+            # that may occur if the column contains non-numeric values.
             numeric_series = numeric_series.round().astype('Int64', errors='ignore')
             # Convert NaN to None (which will become NULL in the database)
+            # This is necessary because NaN is not a valid value in the database,
+            # and it will cause an error if we try to insert it.
+            # We use `where` to replace NaN values with None.
             return numeric_series.where(numeric_series.notna(), None)
 
+        # Define a helper function to apply a custom function to specified columns in a DataFrame if they exist
         def apply_to_columns(df: pd.DataFrame, columns_list: list, func) -> pd.DataFrame:
             """
             Applies a custom function to specified columns in a DataFrame if they exist.
@@ -516,15 +589,24 @@ class PostgresDataLoader(BaseDataLoader):
                 func (function): The custom function to apply to the columns.
 
             Returns:
-                pd.DataFrame: The modified DataFrame.
+                pd.DataFrame: The modified DataFrame with the function applied to specified columns.
             """
+            # Identify columns that are both in the DataFrame and in the provided list
             existing_columns = [col for col in columns_list if col in df.columns]
+
+            # Iterate over each column that exists in the DataFrame
             for column in existing_columns:
-                df[column] = func(df[column])  # Apply function to the full column
+                # Apply the provided function to the entire column
+                # This modifies the DataFrame in place by updating the column with the transformed data
+                df[column] = func(df[column])
+
+            # Return the modified DataFrame
             return df
 
+        # Define a temporary file path
         temp_file = os.path.join(self._temp_dir, f"chunk_{chunk_index}.csv")
 
+        # Define a function to process a single chunk
         @backoff.on_exception(
             backoff.expo,
             (psycopg2.OperationalError, psycopg2.InterfaceError),
@@ -599,28 +681,49 @@ class PostgresDataLoader(BaseDataLoader):
     def _ensure_unique_constraint(self, target_table: str, unique_columns: List[str]):
         """
         Ensure a unique constraint exists on the target table.
+
+        This function checks if a unique constraint on the specified columns of the
+        target table already exists. If it does not exist, it creates a new unique
+        constraint. This helps maintain data integrity by preventing duplicate entries
+        in the target table for the specified columns.
+
+        Args:
+            target_table (str): The name of the table where the unique constraint should be applied.
+            unique_columns (List[str]): A list of column names on which the unique constraint should be imposed.
         """
         try:
+            # Join the list of unique columns into a comma-separated string
             columns_str = ", ".join(unique_columns)
+
+            # Construct a constraint name using the target table and unique columns
+            # This name should be unique within the database
             constraint_name = f"uq_{target_table}_{'_'.join(unique_columns)}"
 
+            # Use a database connection context to ensure the connection is properly closed
             with self._database_manager.connection_context() as conn:
+                # Create a cursor to execute SQL commands
                 with conn.cursor() as cur:
+                    # Query to fetch existing unique constraints on the target table
                     cur.execute(f"""
                         SELECT conname
                         FROM pg_constraint
                         WHERE conrelid = '{target_table}'::regclass
                         AND contype = 'u';
                     """)
+                    # Fetch all constraint names and store them in a set for quick lookup
                     existing_constraints = {row[0] for row in cur.fetchall()}
 
+                    # Check if the desired constraint name is not already present
                     if constraint_name not in existing_constraints:
+                        # Log the creation of a new unique constraint
                         self._logger.info(f"Creating unique constraint {constraint_name} on {target_table} ({columns_str})")
+                        # Execute the command to add a new unique constraint
                         cur.execute(f"""
                             ALTER TABLE {target_table}
                             ADD CONSTRAINT {constraint_name} UNIQUE ({columns_str});
                         """)
         except Exception as e:
+            # Log any error that occurs and re-raise the exception
             self._logger.error(f"Failed to create unique constraint: {e}")
             raise
 
@@ -648,8 +751,11 @@ class PostgresDataLoader(BaseDataLoader):
             result = self._database_manager.execute_query(query, params=(staging_table,), fetch_all=False)
             estimated_rows = result['estimate']
 
+            # We're using an estimated row count instead of COUNT(*) because it's much faster
+            # This is especially important for large tables
             self._logger.info(f"Processing approximately {estimated_rows:,} rows from {staging_table}")
 
+            # If there are no rows to merge, we can skip the process
             if estimated_rows==0:
                 self._logger.info("No rows to merge. Skipping process.")
                 return
@@ -661,6 +767,7 @@ class PostgresDataLoader(BaseDataLoader):
             offset = 0
             total_processed = 0
 
+            # Use a tqdm progress bar to show progress
             with tqdm(total=estimated_rows, desc="Merging Rows", unit="rows") as pbar:
                 while True:
                     # Use a single query for the batch insert
@@ -682,10 +789,12 @@ class PostgresDataLoader(BaseDataLoader):
                             # Get the actual number of rows inserted
                             inserted_rows = cur.rowcount
 
+                            # If we've inserted all the rows, we can exit the loop
                             if inserted_rows==0:
                                 break
 
-                            conn.commit()  # Commit after each batch
+                            # Commit after each batch
+                            conn.commit()
 
                             total_processed += inserted_rows
                             offset += batch_size
@@ -704,7 +813,23 @@ class PostgresDataLoader(BaseDataLoader):
     def _get_table_columns(self, table_name: str) -> list:
         """
         Helper function to get column names from a table.
-        Uses parameterized query to prevent SQL injection.
+        This is useful for when we need to dynamically generate SQL queries.
+
+        This function uses a parameterized query to get the column names.
+        This is important because it prevents SQL injection attacks.
+
+        The query is:
+            SELECT column_name
+            FROM information_schema.columns
+            WHERE table_name = %s
+            ORDER BY ordinal_position
+
+        The %s is a placeholder that gets replaced with the actual table name
+        when the query is executed. This is how we prevent SQL injection.
+
+        The result of the query is a list of dictionaries, where each dictionary
+        has a single key-value pair: 'column_name'. We extract the column names
+        from the dictionaries and return them as an ordered list.
 
         Args:
             table_name (str): Name of the table to get columns from
@@ -718,16 +843,35 @@ class PostgresDataLoader(BaseDataLoader):
             WHERE table_name = %s 
             ORDER BY ordinal_position
         """
-        result = self._database_manager.execute_query(query, params=(table_name,), fetch_all=True)
+        result = self._database_manager.execute_query(
+            query,
+            params=(table_name,),
+            fetch_all=True
+        )
         return [row['column_name'] for row in result]
 
     def _cleanup_staging(self, staging_table: str):
-        """Drop the staging table."""
+        """
+        Drop the staging table.
+
+        This function takes the name of the staging table as an argument.
+        It then constructs a SQL query to drop the table.
+        The query is executed using the execute_query method of the database manager.
+        If the query is successful, the function logs a message indicating that the table was dropped.
+        If the query fails, the function logs a message with the error message and raises the exception.
+
+        Args:
+            staging_table (str): Name of the staging table to drop
+        """
         try:
+            # Construct the SQL query to drop the table
             query = f"DROP TABLE IF EXISTS {staging_table}"
+            # Execute the query using the database manager
             self._database_manager.execute_query(query, fetch_all=False)
+            # Log a message indicating that the table was dropped
             self._logger.info(f"Dropped staging table {staging_table}")
         except Exception as e:
+            # Log a message with the error message and raise the exception
             self._logger.error(f"Failed to drop staging table {staging_table}: {e}")
             raise
 
@@ -735,18 +879,24 @@ class PostgresDataLoader(BaseDataLoader):
                               chunk_statuses: List, total_rows_loaded: int,
                               chunk_pbar: tqdm, rows_pbar: tqdm) -> None:
         """Helper method to process successful chunk results."""
+
+        # Append the result of the processed chunk to the chunk_statuses list
+        # The dictionary includes the chunk index, number of rows processed,
+        # success status, and the duration it took to process the chunk
         chunk_statuses.append({
-            'chunk_index': chunk_info['chunk_index'],
-            'rows': chunk_info['rows'],
-            'success': True,
-            'duration': result.get('duration', 0)
+            'chunk_index': chunk_info['chunk_index'],  # Index of the current chunk
+            'rows': chunk_info['rows'],                # Number of rows in the current chunk
+            'success': True,                           # Status indicating the chunk was processed successfully
+            'duration': result.get('duration', 0)      # Duration to process the chunk, default to 0 if not provided
         })
 
-        # Update progress bars
-        chunk_pbar.update(1)
-        rows_pbar.update(chunk_info['rows'])
+        # Update the progress bars to reflect the completion of the current chunk
+        chunk_pbar.update(1)                          # Increment the chunk progress bar by 1
+        rows_pbar.update(chunk_info['rows'])          # Increment the row progress bar by the number of rows processed
 
-        # Log chunk completion
+        # Log an informational message indicating the completion of the chunk
+        # Includes details such as the chunk index, number of rows processed,
+        # the duration, and the rows processed per second
         self._logger.info(
             f"Chunk {chunk_info['chunk_index']} completed: "
             f"{chunk_info['rows']:,} rows in {result['duration']:.2f}s "
@@ -755,7 +905,28 @@ class PostgresDataLoader(BaseDataLoader):
 
     def _handle_chunk_error(self, chunk_info: Dict, error: Exception,
                             chunk_statuses: List) -> None:
-        """Helper method to handle chunk processing errors."""
+        """Helper method to handle errors when processing chunks.
+
+        When a chunk fails to process, this method is called with the
+        following arguments:
+
+        - chunk_info: A dictionary with information about the chunk that
+          failed, including the chunk index and the number of rows in the
+          chunk.
+        - error: The exception that was raised when processing the chunk.
+        - chunk_statuses: A list of dictionaries, where each dictionary
+          represents the result of processing a chunk. If the chunk was
+          processed successfully, the dictionary will contain the chunk
+          index, number of rows in the chunk, a boolean indicating
+          success, and the duration it took to process the chunk. If the
+          chunk failed to process, the dictionary will contain the chunk
+          index, number of rows in the chunk, a boolean indicating failure,
+          and a string representation of the error that was raised.
+
+        This method appends a new dictionary to the chunk_statuses list,
+        indicating that the chunk failed to process. It also logs an error
+        message with the chunk index and the error message.
+        """
         chunk_statuses.append({
             'chunk_index': chunk_info['chunk_index'],
             'rows': chunk_info['rows'],
@@ -767,16 +938,43 @@ class PostgresDataLoader(BaseDataLoader):
     def _calculate_statistics(self, chunk_statuses: List,
                               total_rows_loaded: int,
                               total_duration: float) -> Dict:
-        """Calculate final loading statistics."""
+        """
+        Calculate final loading statistics.
+
+        This function processes the list of chunk statuses to determine
+        various metrics related to the data loading operation. It calculates
+        the total number of chunks processed, the number of successful and
+        failed chunks, and the rate at which rows were processed.
+
+        Args:
+            chunk_statuses (List): A list of dictionaries containing the status
+                                   of each chunk processed. Each dictionary
+                                   should have a 'success' key indicating the
+                                   success status of the chunk.
+            total_rows_loaded (int): The total number of rows successfully
+                                     loaded into the database.
+            total_duration (float): The total time (in seconds) taken to load
+                                    the data.
+
+        Returns:
+            Dict: A dictionary containing calculated statistics including
+                  'total_rows_loaded', 'total_duration', 'chunks_total',
+                  'chunks_successful', 'chunks_failed', and 'rows_per_second'.
+        """
+        # Filter the list of chunk statuses to find all successful chunks
         successful_chunks = [cs for cs in chunk_statuses if cs['success']]
+
+        # Filter the list of chunk statuses to find all failed chunks
         failed_chunks = [cs for cs in chunk_statuses if not cs['success']]
 
+        # Return a dictionary containing various loading statistics
         return {
-            'total_rows_loaded': total_rows_loaded,
-            'total_duration': total_duration,
-            'chunks_total': len(chunk_statuses) + 1,  # Add 1 for first chunk
-            'chunks_successful': len(successful_chunks) + 1,
-            'chunks_failed': len(failed_chunks),
+            'total_rows_loaded': total_rows_loaded,  # Total rows loaded
+            'total_duration': total_duration,        # Total duration of loading
+            'chunks_total': len(chunk_statuses) + 1,  # Total chunks processed, including the first one
+            'chunks_successful': len(successful_chunks) + 1,  # Successful chunks, including the first one
+            'chunks_failed': len(failed_chunks),  # Total failed chunks
+            # Calculate rows per second, with a check to avoid division by zero
             'rows_per_second': total_rows_loaded / total_duration if total_duration > 0 else 0
         }
 
@@ -798,10 +996,31 @@ class PostgresDataLoader(BaseDataLoader):
     ) -> Dict[str, float]:
         """
         Load a single chunk with improved performance and connection handling.
+
+        This method is a wrapper around the pandas.to_sql() method which is used
+        to load a DataFrame into a PostgreSQL database. It adds a few features
+        to make the process more robust and efficient:
+
+        - It uses SQLAlchemy's connection pooling to reduce the overhead of
+          connecting to the database for each chunk.
+        - It uses psycopg2's bulk copy support (via the 'multi' method) to
+          improve performance when inserting large amounts of data.
+        - It uses backoff's retry decorator to handle some common transient
+          errors that can occur when connecting to the database.
+
+        The method takes a DataFrame and a table name as input, and loads the
+        DataFrame into the specified table. It returns a dictionary containing
+        a single key-value pair, where the key is 'duration' and the value is
+        the time it took to load the chunk (in seconds).
+
+        This method is called by the _load_data method, which coordinates the
+        loading of all chunks in the DataFrame.
         """
         start_time = time.time()
 
+        # Acquire a connection from the connection pool
         with self._engine.begin() as conn:
+            # Use the 'multi' method to enable bulk copy support
             df.to_sql(
                 table_name,
                 conn,
@@ -811,7 +1030,10 @@ class PostgresDataLoader(BaseDataLoader):
                 chunksize=100000  # Optimize bulk insert size
             )
 
+        # Calculate the duration of the load operation
         duration = time.time() - start_time
+
+        # Return a dictionary containing the load duration
         return {'duration': duration}
 
     def create_table(self,
@@ -827,26 +1049,39 @@ class PostgresDataLoader(BaseDataLoader):
             stats: Dict[str, Union[int, float]]
     ):
         """
-        Log comprehensive loading statistics.
+        Verbosely log the results of loading data into a table.
+
+        This method takes a table name and a dictionary of loading statistics
+        as input, and logs a formatted message containing the results of the
+        load operation. The message includes the total number of rows loaded,
+        the total duration of the load operation, the number of rows loaded per
+        second, and the number of chunks processed (both total and successful).
 
         Args:
             table_name: Name of the table being loaded
             stats: Loading statistics dictionary
         """
+        # Extract the relevant statistics from the input dictionary
+        total_rows_loaded = stats['total_rows_loaded']
+        total_duration = stats['total_duration']
+        rows_per_second = stats['rows_per_second']
+        chunks_total = stats['chunks_total']
+        chunks_successful = stats['chunks_successful']
+        chunks_failed = stats['chunks_failed']
+
+        # Format the log message
         log_message = (
             f"Data Load Statistics for Table '{table_name}':\n"
-            f"  Total Rows Loaded: {stats['total_rows_loaded']:,}\n"
-            f"  Total Duration: {stats['total_duration']:.2f} seconds\n"
-            f"  Rows/Second: {stats['rows_per_second']:.2f}\n"
-            f"  Chunks Total: {stats['chunks_total']}\n"
-            f"  Chunks Successful: {stats['chunks_successful']}\n"
-            f"  Chunks Failed: {stats['chunks_failed']}"
+            f"  Total Rows Loaded: {total_rows_loaded:,}\n"
+            f"  Total Duration: {total_duration:.2f} seconds\n"
+            f"  Rows/Second: {rows_per_second:.2f}\n"
+            f"  Chunks Total: {chunks_total}\n"
+            f"  Chunks Successful: {chunks_successful}\n"
+            f"  Chunks Failed: {chunks_failed}"
         )
 
-        # Log as info or warning based on success
-        log_method = (
-            self._logger.warning
-            if stats['chunks_failed'] > 0
-            else self._logger.info
-        )
-        log_method(log_message)
+        # Determine the log level based on the success of the load operation
+        log_level = logging.WARNING if chunks_failed > 0 else logging.INFO
+
+        # Log the message at the appropriate level
+        self._logger.log(log_level, log_message)
