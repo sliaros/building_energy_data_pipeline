@@ -1,5 +1,3 @@
-import os
-import yaml
 import logging
 from typing import Dict, Any
 from src.data_extraction.data_extractor import DataExtractor

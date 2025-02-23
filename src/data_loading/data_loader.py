@@ -49,20 +49,44 @@ class PostgresDataLoader(BaseDataLoader):
     """
     def __init__(
                 self,
-                config: Dict,
+                config: Dict[str, Any],
                 max_workers: int = 4,
                 max_retries: int = 3,
                 db_type: str = "staging",
-                db_params: Optional[Dict] = None,
+                db_params: Optional[Dict[str, Any]] = None,
                 sampling_strategy: Optional[BaseSamplingStrategy] = None
-        ):
+        ) -> None:
+            """
+            Initialize the PostgresDataLoader with configuration parameters.
+
+            Args:
+                config: A dictionary with configuration settings, e.g. database host, port, user, password, etc.
+                max_workers: The maximum number of threads to use for data loading (default: 4)
+                max_retries: The maximum number of retries for failed database operations (default: 3)
+                db_type: The type of database to connect to (default: "staging")
+                db_params: An optional dictionary with database connection parameters
+                sampling_strategy: An optional sampling strategy to use for data sampling (default: RandomSamplingStrategy)
+
+            Returns:
+                None
+            """
+
+            # Store the configuration in an instance variable
             self._config = config
+
+            # Create a logger for this class
             self._logger = logging.getLogger(self.__class__.__name__)
 
+            # Set the maximum number of threads to use for data loading
             self._max_workers = max_workers
+
+            # Set the maximum number of retries for failed database operations
             self._max_retries = max_retries
 
+            # Get the database connection parameters based on the db_type
             self._db_params = self._get_db_params(db_type, db_params)
+
+            # Create a DatabaseConfig object from the database connection parameters
             self._db_config = DatabaseConfig(
                                     host=self._db_params['host'],
                                     port=self._db_params['port'],
@@ -71,39 +95,60 @@ class PostgresDataLoader(BaseDataLoader):
                                     password=self._db_params['password']
                                 )
 
+            # Create a PostgresManager object with the database configuration
             self._database_manager = PostgresManager(self._db_config)
 
+            # Verify the connection to the database
             self._database_manager.verify_connection_with_database()
 
+            # Create a SQLAlchemy URL from the database connection parameters
             self._sqlalchemy_url = self._database_manager.postgres_params_to_sqlalchemy_url()
 
+            # Create a connection pool with the given number of workers
             self._engine = create_engine(
-                self._database_manager.postgres_params_to_sqlalchemy_url(),
+                self._sqlalchemy_url,
                 pool_size=max_workers,
                 max_overflow=2
             )
 
+            # Log the creation of the connection pool
             self._logger.info(f"Created connection pool with max {max_workers + 2} connections.")
 
-            # Create temp directory for chunk files
+            # Create a temporary directory for storing chunk files
             self._temp_dir = tempfile.mkdtemp()
             self._logger.info(f"Created temporary directory at {self._temp_dir}")
 
+            # Set the sampling strategy to use for data sampling
             self._sampling_strategy = sampling_strategy or RandomSamplingStrategy()
 
     def __del__(self):
-            """Cleanup temporary directory on object destruction"""
-            try:
-                if hasattr(self, '_temp_dir') and os.path.exists(self._temp_dir):
-                    shutil.rmtree(self._temp_dir)
-                    self._logger.info(f"Cleaned up temporary directory {self._temp_dir}")
+        """Cleanup temporary directory and database connections on object destruction
 
-                    # **Close the connection pool**
-                if hasattr(self, '_database_manager'):
-                    self._database_manager.close_all_connections()
-                    self._logger.info("Closed all connections in the pool.")
+        When the DataLoader object is destroyed (e.g. goes out of scope), we need to
+        clean up any temporary files and close any open connections to the database.
+        """
+
+        # Check if the temporary directory has been created
+        if hasattr(self, '_temp_dir') and os.path.exists(self._temp_dir):
+            try:
+                # Attempt to remove the temporary directory
+                shutil.rmtree(self._temp_dir)
             except Exception as e:
-                self._logger.error(f"Cleanup failed: {e}")
+                # If there's an error, log it
+                self._logger.error(
+                    f"Failed to remove temporary directory {self._temp_dir}: {e}"
+                )
+
+        # Check if the database manager has been initialized
+        if hasattr(self, '_database_manager'):
+            try:
+                # Attempt to close all connections in the database connection pool
+                self._database_manager.close_all_connections()
+            except Exception as e:
+                # If there's an error, log it
+                self._logger.error(
+                    f"Failed to close all connections in the pool: {e}"
+                )
 
     def _get_db_params(self, db_type: str, db_params: Optional[Dict]) -> Dict:
         """

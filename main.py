@@ -2,7 +2,7 @@ from src.pipeline.orchestrator import Orchestrator
 
 if __name__ == "__main__":
     orch = Orchestrator("demo_database")
-    # orch.retrieve_data()
+    orch.retrieve_data()
     # orch.transform_data()
     # orch.read_parquet_info()
     # orch.load_data()
