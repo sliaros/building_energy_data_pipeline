@@ -3,7 +3,6 @@ from typing import Dict, Any
 from src.data_extraction.data_extractor import DataExtractor
 from src.data_loading.data_loader import PostgresDataLoader
 from src.data_transformation.data_transformer import DataTransformer
-from src.logging_configuration.logging_config import setup_logging
 from src.utility.file_utils import FileUtils
 from src.schema_generator.schema_analysis_orchestrator import SchemaAnalysisManager
 from src.postgres_managing.postgres_manager import PostgresManager, DatabaseConfig
@@ -17,8 +16,6 @@ class Orchestrator:
     def __init__(self, database_name:str = None):
         """
         Initializes the Orchestrator object.
-
-        :param config_path: The path to a YAML configuration file
         """
 
         """Initializes the Orchestrator with configurations from ConfigManager."""
