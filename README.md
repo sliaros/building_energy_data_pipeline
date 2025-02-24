@@ -1,99 +1,144 @@
-# Enhanced Schema Generator
+# Building Energy Data Pipeline
 
-A robust and efficient tool for generating PostgreSQL schemas from CSV and Parquet files.
+## Overview
 
-## Features
+The Building Energy Data Pipeline is a robust, enterprise-grade application designed to streamline the extraction, transformation, and loading (ETL) of building energy data. This comprehensive solution automates the entire data lifecycle from acquisition to database storage, enabling advanced analytics and insights for energy consumption patterns.
 
-- Support for CSV and Parquet file formats
-- Intelligent data sampling with progress tracking
-- Advanced type inference and schema analysis
-- Comprehensive column profiling
-- SQL optimization suggestions
-- Detailed logging and error handling
-- Command-line interface
+## Key Features
 
-## Installation
+- **Automated Data Retrieval**: Seamlessly downloads data from Zenodo repositories
+- **Intelligent Data Transformation**: Processes and converts raw data to optimized Parquet format
+- **PostgreSQL Integration**: Efficiently loads transformed data into PostgreSQL databases
+- **Schema Analysis and Generation**: Automatically analyzes data structure and generates appropriate database schemas
+- **Secure Database Management**: Includes SSL certificate management for secure database connections
+- **Centralized Configuration Management**: Offers flexible YAML-based configuration system
+- **Comprehensive Logging**: Provides detailed logging for monitoring and troubleshooting
 
-1. Clone the repository
-2. Create a virtual environment:
-   ```bash
-   python -m venv venv
-   source venv/bin/activate  # On Windows: venv\Scripts\activate
-   ```
-3. Install dependencies:
-   ```bash
-   pip install -r requirements.txt
-   ```
+## Architecture
 
-## Usage
+The application follows a modular architecture with clear separation of concerns:
 
-### Command Line Interface
+- **Orchestration Layer**: Coordinates the entire data pipeline process
+- **Data Extraction**: Handles data retrieval from external sources
+- **Data Transformation**: Processes raw data into optimized formats
+- **Data Loading**: Manages database interactions and data ingestion
+- **Configuration Management**: Provides centralized configuration services
+- **Security Management**: Handles SSL certificate generation and management
 
-Basic usage:
+## Getting Started
+
+### Prerequisites
+
+- Python 3.8 or higher
+- PostgreSQL 13 or higher
+- OpenSSL (for secure database connections)
+
+### Installation
+
 ```bash
-python main.py input_file.csv
+# Clone the repository
+git clone https://github.com/yourusername/building-energy-data-pipeline.git
+cd building-energy-data-pipeline
+
+# Install dependencies
+pip install -r requirements.txt
+
+# Configure the application
+cp config/app_config.example.yaml config/app_config.yaml
 ```
 
-With options:
-```bash
-python main.py input_file.parquet \
-    --output schema.sql \
-    --table my_table \
-    --schema my_schema \
-    --sampling-method random \
-    --max-rows 50000 \
-    --sampling-ratio 0.05
-```
+### Configuration
 
-### Python API
+The application uses YAML configuration files located in the `./config` directory:
+
+- `app_config.yaml`: Main application configuration
+- `project_structure_config.yaml`: Defines project directory structure
+
+Edit these files to customize the application to your environment.
+
+### Basic Usage
 
 ```python
-from pathlib import Path
-from schema_generator import SchemaGenerationOrchestrator
-from smart_sampler import SamplingConfig
+from src.orchestration.orchestrator import Orchestrator
 
-# Configure sampling
-config = SamplingConfig(
-    method="random",
-    max_rows=50000,
-    sampling_ratio=0.05
-)
+# Initialize the pipeline
+pipeline = Orchestrator()
 
-# Create orchestrator
-orchestrator = SchemaGenerationOrchestrator(
-    input_file=Path("input_file.csv"),
-    output_file=Path("output.sql"),
-    table_name="my_table",
-    schema_name="my_schema",
-    sampling_config=config
-)
-
-# Generate schema
-sql = orchestrator.generate()
+# Run the complete ETL process
+pipeline.retrieve_data()
+pipeline.transform_data()
+pipeline.load_data()
 ```
 
-## Key Components
+## Advanced Features
 
-1. **Smart Sampling**: Progressive data sampling with multiple strategies
-2. **Schema Analysis**: Advanced type inference and column profiling
-3. **SQL Generation**: Optimized SQL schema generation with best practices
-4. **Logging**: Comprehensive logging with rotation and formatting
+### Custom Database Management
 
-## Logging
+```python
+# Create a connection to a specific database
+pipeline = Orchestrator(database_name="energy_analytics")
 
-Logs are stored in the `logs` directory with the following format:
-- Daily rotation
-- Maximum size: 10MB
-- Keeps last 5 backups
-- Detailed formatting for debugging
+# Manage database sessions
+active_sessions = pipeline.return_active_sessions()
+pipeline.terminate_sessions("energy_analytics", state="idle")
+
+# Database cleanup
+pipeline.delete_database("old_database", force=True)
+```
+
+### Secure Database Connections
+
+The application includes a comprehensive SSL certificate management system:
+
+```python
+from src.security.ca_manager import CaManager
+
+# Initialize the certificate manager
+ca_manager = CaManager()
+
+# Generate a new certificate
+ca_manager.generate_cert_with_cryptography()
+
+# Configure PostgreSQL to use SSL
+ca_manager.configure_postgresql_ssl(enable_ssl=True)
+```
+
+## Technical Details
+
+### Modular Components
+
+- **Orchestrator**: Coordinates the complete data pipeline
+- **DataExtractor**: Handles data retrieval from external sources
+- **DataTransformer**: Converts data between formats and optimizes storage
+- **PostgresDataLoader**: Manages database operations
+- **SchemaAnalysisManager**: Analyzes data structure and creates database schemas
+- **ConfigManager**: Provides centralized configuration management
+- **CaManager**: Handles SSL certificate operations
+
+### Performance Considerations
+
+- Data is processed in chunks to optimize memory usage
+- Parquet format provides efficient storage and faster query performance
+- Configurable chunk sizes for optimal loading performance
+
+## Documentation
+
+For detailed documentation on each component:
+
+- [Orchestrator Documentation](docs/orchestrator.md)
+- [Data Processing Guide](docs/data_processing.md)
+- [Configuration Reference](docs/configuration.md)
+- [Security Setup](docs/security.md)
 
 ## Contributing
 
-1. Fork the repository
-2. Create a feature branch
-3. Make your changes
-4. Submit a pull request
+Contributions are welcome! Please feel free to submit a Pull Request.
 
 ## License
 
-MIT License
+This project is licensed under the MIT License - see the LICENSE file for details.
+
+## Acknowledgements
+
+- Data sources provided by Zenodo
+- Inspiration from various energy data analysis frameworks
