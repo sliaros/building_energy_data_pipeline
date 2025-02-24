@@ -18,8 +18,8 @@ project_structure:
     data_loading:
     # Analytics scripts: Tools for generating reports and insights
     analytics:
-    # Pipeline: Contains the orchestrator class that will sum the orchestrator logic
-    pipeline:
+    # Orchestrator: Contains the orchestrator class that will sum the orchestrator logic
+    orchestrator:
     # Utility scripts: Tools for utility functions and helper classes
     utility:
     # Postgres managing
