@@ -29,7 +29,7 @@ class DatabaseConfig:
     max_connections: int = 20
     connection_timeout: int = 30
     query_timeout: int = 30000  # milliseconds
-    enable_ssl: bool = True
+    enable_ssl: bool = False
     ssl_mode: str = "prefer"
     work_mem: str = "16MB"
     maintenance_work_mem: str = "128MB"
@@ -39,9 +39,10 @@ class DatabaseConfig:
     pg_hba_conf: Optional[str] = None
 
     def __post_init__(self):
-            if not self.host:
-                raise ValueError("Host cannot be empty")
-
+        if not self.host:
+            raise ValueError("Host cannot be empty")
+        if self.ssl_mode in ["allow", "prefer", "require", "verify-ca", "verify-full"]:
+            self.enable_ssl = True
 
 def configure_connection(func):
     """Decorator to apply session-level settings to database connections."""
@@ -100,6 +101,18 @@ class PostgresManager:
         if not self._initialized or temporary:
             self.verify_connection_with_database()
 
+        if self.db_config.enable_ssl:
+            from src.ca_managing.ca_manager import CaManager
+            ssl_manager = CaManager()
+            if not ssl_manager.validate_certificate():
+                ssl_manager.generate_self_signed_cert()
+                ssl_manager.configure_postgresql_ssl(enable_ssl=True)
+
+    def give_up_handler(details):
+        """Handler called when max_tries is reached."""
+        logging.error(f"Max retries ({details}) reached. Giving up.")
+        raise Exception("Max retries reached. Failed to establish database connection.")
+
     @classmethod
     def create_temporary_instance(cls, temp_config: DatabaseConfig):
         """Create a temporary instance for switching databases"""
@@ -110,8 +123,9 @@ class PostgresManager:
         (psycopg2.OperationalError, psycopg2.InterfaceError),
         max_tries=5,
         on_backoff=lambda details: logging.warning(
-            f"Retrying database connection pool initialization (attempt {details['tries']} after {details['wait']:.2f}s)..."
+            f"Retrying database connection retrieval (attempt {details['tries']} after {details['wait']:.2f}s)..."
         ),
+        giveup=give_up_handler,
     )
     def _initialize_connection_pool(self) -> None:
         """Initialize the PostgreSQL connection pool."""

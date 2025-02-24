@@ -1,4 +1,4 @@
-from src.pipeline.orchestrator import Orchestrator
+from src.orchestrator.orchestrator import Orchestrator
 
 if __name__ == "__main__":
     orch = Orchestrator("demo_database")
@@ -6,7 +6,7 @@ if __name__ == "__main__":
     orch.transform_data()
     orch.read_parquet_info()
     orch.load_data()
-    # print(orch.return_active_sessions({'state': 'active'}))
-    # orch.terminate_sessions('postgres')
-    # orch.delete_database('demo_db')
+    print(orch.return_active_sessions({'state': 'active'}))
+    orch.terminate_sessions('postgres')
+    orch.delete_database('demo_db')
     pass

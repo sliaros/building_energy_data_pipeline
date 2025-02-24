@@ -1,4 +1,4 @@
-# Root folder for the building energy data pipeline project
+# Root folder for the building energy data orchestrator project
 project_structure:
   # Folder containing all data sources, both raw and processed
   data_sources:
@@ -8,7 +8,7 @@ project_structure:
     cleaned_data:
     # Processed data folder: Contains processed data ready for use in reports
     processed_data:
-    # Source code folder: Contains all scripts and modules for the pipeline
+    # Source code folder: Contains all scripts and modules for the orchestrator
   src:
     # Data extraction scripts: Tools to fetch and extract data from various sources
     data_extraction:
@@ -18,7 +18,7 @@ project_structure:
     data_loading:
     # Analytics scripts: Tools for generating reports and insights
     analytics:
-    # Pipeline: Contains the orchestrator class that will sum the pipeline logic
+    # Pipeline: Contains the orchestrator class that will sum the orchestrator logic
     pipeline:
     # Utility scripts: Tools for utility functions and helper classes
     utility:
@@ -30,9 +30,9 @@ project_structure:
     configuration_managing:
     # Logging
     logging_configuration:
-  # Configuration folder: Contains settings and parameters for the pipeline
+  # Configuration folder: Contains settings and parameters for the orchestrator
   config:
-  # Tests folder: Contains unit and integration tests for the pipeline
+  # Tests folder: Contains unit and integration tests for the orchestrator
   tests:
   # Jupyter notebooks: Contains Jupyter notebooks for data exploration and analysis
   notebooks:

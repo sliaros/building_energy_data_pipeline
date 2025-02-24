@@ -56,7 +56,7 @@ class Orchestrator:
         """Load configuration from YAML file"""
         try:
             config = FileUtils()._load_yaml_file("./config/app_config.yaml")
-            self._logger.info("Successfully loaded pipeline configuration")
+            self._logger.info("Successfully loaded orchestrator configuration")
             return config
         except Exception as e:
             self._logger.error(f"Failed to load configuration: {e}")

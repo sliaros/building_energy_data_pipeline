@@ -175,6 +175,7 @@ class CaManager:
                 command.append("-text")
             subprocess.run(command, check=True)
             self._logger.info(f"Certificate {cert_path} is valid (OpenSSL check).")
+            return True
         except subprocess.CalledProcessError as e:
             self._logger.error(f"Invalid certificate: {e}")
             raise
@@ -186,6 +187,7 @@ class CaManager:
                 if show_details:
                     self._log_certificate_details(cert, cert_path)
             self._logger.info(f"Certificate {cert_path} is valid (cryptography check).")
+            return True
         except Exception as e:
             self._logger.error(f"Invalid certificate using cryptography check: {e}")
             raise
@@ -290,9 +292,9 @@ class CaManager:
             self._logger.info("PostgreSQL SSL configuration disabled successfully.")
 
 
-if __name__ == "__main__":
-    # Example usage
-    ssl_manager = CaManager()
-    ssl_manager.generate_self_signed_cert()
-    ssl_manager.validate_certificate()
-    ssl_manager.configure_postgresql_ssl(enable_ssl=True)
+# if __name__ == "__main__":
+#     # Example usage
+#     ssl_manager = CaManager()
+#     ssl_manager.generate_self_signed_cert()
+#     ssl_manager.validate_certificate()
+#     ssl_manager.configure_postgresql_ssl(enable_ssl=True)
