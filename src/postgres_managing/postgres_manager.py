@@ -15,6 +15,7 @@ from functools import lru_cache, wraps
 from pathlib import Path
 from sqlalchemy.engine.url import URL
 import threading
+from src.ca_managing.ca_manager import CaManager
 
 @dataclass
 class DatabaseConfig:
@@ -29,7 +30,7 @@ class DatabaseConfig:
     max_connections: int = 20
     connection_timeout: int = 30
     query_timeout: int = 30000  # milliseconds
-    enable_ssl: bool = False
+    enable_ssl: bool = True
     ssl_mode: str = "prefer"
     work_mem: str = "16MB"
     maintenance_work_mem: str = "128MB"
@@ -43,6 +44,8 @@ class DatabaseConfig:
             raise ValueError("Host cannot be empty")
         if self.ssl_mode in ["allow", "prefer", "require", "verify-ca", "verify-full"]:
             self.enable_ssl = True
+        elif self.ssl_mode == "disable":
+            self.enable_ssl = False
 
 def configure_connection(func):
     """Decorator to apply session-level settings to database connections."""
@@ -88,7 +91,6 @@ class PostgresManager:
         if not self.db_config.host:
             raise ValueError("Host cannot be empty")
         self.default_db_config = default_db_config
-
         self._logger = db_config.logger or logging.getLogger(self.__class__.__name__)
         self._pool = None
         self._initialized = False
@@ -101,12 +103,15 @@ class PostgresManager:
         if not self._initialized or temporary:
             self.verify_connection_with_database()
 
+        ssl_manager = CaManager()
+
         if self.db_config.enable_ssl:
-            from src.ca_managing.ca_manager import CaManager
+
             ssl_manager = CaManager()
             if not ssl_manager.validate_certificate():
-                ssl_manager.generate_self_signed_cert()
                 ssl_manager.configure_postgresql_ssl(enable_ssl=True)
+        else:
+            ssl_manager.configure_postgresql_ssl(enable_ssl=False)
 
     def give_up_handler(details):
         """Handler called when max_tries is reached."""
@@ -121,11 +126,10 @@ class PostgresManager:
     @backoff.on_exception(
         backoff.expo,
         (psycopg2.OperationalError, psycopg2.InterfaceError),
-        max_tries=5,
+        max_tries=3,
         on_backoff=lambda details: logging.warning(
             f"Retrying database connection retrieval (attempt {details['tries']} after {details['wait']:.2f}s)..."
         ),
-        giveup=give_up_handler,
     )
     def _initialize_connection_pool(self) -> None:
         """Initialize the PostgreSQL connection pool."""
@@ -146,10 +150,11 @@ class PostgresManager:
     @backoff.on_exception(
         backoff.expo,
         (psycopg2.OperationalError, psycopg2.InterfaceError),
-        max_tries=5,
+        max_tries=3,
         on_backoff=lambda details: logging.warning(
             f"Retrying database connection retrieval (attempt {details['tries']} after {details['wait']:.2f}s)..."
         ),
+        giveup=give_up_handler,
     )
     def get_connection(self):
         """Get a connection from the pool instead of creating a new one."""
@@ -1187,66 +1192,66 @@ class PostgresManager:
 
 
 # Example usage:
-if __name__=="__main__":
-    # Configuration and initialization
-    config = DatabaseConfig(
-        host="localhost",
-        port=5432,
-        database="building_energy_staging_db_v2",
-        user="postgres",
-        password="postgres"
-    )
-
-    db = PostgresManager(config)
-
-    # Create a table
-    columns = [
-        {'name': 'id', 'type': 'SERIAL', 'nullable': False},
-        {'name': 'name', 'type': 'VARCHAR(100)', 'nullable': False},
-        {'name': 'email', 'type': 'VARCHAR(255)', 'nullable': False},
-        {'name': 'created_at', 'type': 'TIMESTAMP', 'default': 'CURRENT_TIMESTAMP'}
-    ]
-
-    from src.schema_generator.schema_analyzer import SQLSchemaGenerator
-
-    table_schema = SQLSchemaGenerator().generate_schema_from_columns('users', columns)
-
-    db.create_table_from_schema(table_schema, 'users', if_exists='raplace')
-
-    # Get database health metrics
-    db_size = db.get_database_size()
-    table_sizes = db.get_table_sizes()
-    slow_queries = db.get_slow_queries()
-    table_info = db.get_table_definition('users')
-    dependencies = db.get_table_dependencies('users')
-
-    # Perform maintenance
-    db.vacuum_analyze_table('users')
-
-    # Get table information
-    print("Database size:", db_size)
-    # print("Table sizes:", json.dumps(table_sizes, indent=2))
-    print("Slow queries:", json.dumps(slow_queries, indent=2))
-    print("Table info:", json.dumps(table_info, indent=2))
-    print("Dependencies:", json.dumps(dependencies, indent=2))
-    # print("Exported table to CSV:", db.export_table_to_csv('users', 'users.csv'))
-
-    # Example usage of advanced features
-    # Get database health metrics
-    cache_stats = db.get_cache_hit_ratios()
-    bloat_analysis = db.get_bloat_analysis()
-    print(cache_stats, bloat_analysis)
-
-    # Monitor replication
-    replication_status = db.get_replication_status()
-    print(replication_status)
-
-    # Analyze performance
-    missing_indexes = db.get_missing_indexes()
-    unused_indexes = db.get_unused_indexes()
-
-    # Security audit
-    user_permissions = db.audit_user_permissions()
-
-    print("Cache hit ratios:", cache_stats)
-    print("Bloat analysis:", bloat_analysis)
+# if __name__=="__main__":
+#     # Configuration and initialization
+#     config = DatabaseConfig(
+#         host="localhost",
+#         port=5432,
+#         database="building_energy_staging_db_v2",
+#         user="postgres",
+#         password="postgres"
+#     )
+#
+#     db = PostgresManager(config)
+#
+#     # Create a table
+#     columns = [
+#         {'name': 'id', 'type': 'SERIAL', 'nullable': False},
+#         {'name': 'name', 'type': 'VARCHAR(100)', 'nullable': False},
+#         {'name': 'email', 'type': 'VARCHAR(255)', 'nullable': False},
+#         {'name': 'created_at', 'type': 'TIMESTAMP', 'default': 'CURRENT_TIMESTAMP'}
+#     ]
+#
+#     from src.schema_generator.schema_analyzer import SQLSchemaGenerator
+#
+#     table_schema = SQLSchemaGenerator().generate_schema_from_columns('users', columns)
+#
+#     db.create_table_from_schema(table_schema, 'users', if_exists='raplace')
+#
+#     # Get database health metrics
+#     db_size = db.get_database_size()
+#     table_sizes = db.get_table_sizes()
+#     slow_queries = db.get_slow_queries()
+#     table_info = db.get_table_definition('users')
+#     dependencies = db.get_table_dependencies('users')
+#
+#     # Perform maintenance
+#     db.vacuum_analyze_table('users')
+#
+#     # Get table information
+#     print("Database size:", db_size)
+#     # print("Table sizes:", json.dumps(table_sizes, indent=2))
+#     print("Slow queries:", json.dumps(slow_queries, indent=2))
+#     print("Table info:", json.dumps(table_info, indent=2))
+#     print("Dependencies:", json.dumps(dependencies, indent=2))
+#     # print("Exported table to CSV:", db.export_table_to_csv('users', 'users.csv'))
+#
+#     # Example usage of advanced features
+#     # Get database health metrics
+#     cache_stats = db.get_cache_hit_ratios()
+#     bloat_analysis = db.get_bloat_analysis()
+#     print(cache_stats, bloat_analysis)
+#
+#     # Monitor replication
+#     replication_status = db.get_replication_status()
+#     print(replication_status)
+#
+#     # Analyze performance
+#     missing_indexes = db.get_missing_indexes()
+#     unused_indexes = db.get_unused_indexes()
+#
+#     # Security audit
+#     user_permissions = db.audit_user_permissions()
+#
+#     print("Cache hit ratios:", cache_stats)
+#     print("Bloat analysis:", bloat_analysis)

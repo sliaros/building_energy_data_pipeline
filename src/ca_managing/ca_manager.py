@@ -43,6 +43,10 @@ class CaManager:
         if not self._logger.hasHandlers():
             setup_logging(log_file=log_file)
 
+        if not os.path.exists(cert_path):
+            self._logger.error(f"Certificate file not found: {cert_path}")
+            self.generate_cert_with_cryptography()
+
     def generate_self_signed_cert(
         self,
         cert_path: Optional[str] = None,
@@ -82,8 +86,6 @@ class CaManager:
             ], check=True)
             os.chmod(key_path, 0o600)  # Secure the private key
             self._logger.info(f"Self-signed certificate generated: {cert_path}, {key_path}")
-        except FileNotFoundError:
-            self._logger.error(f"OpenSSL binary not found at {self._openssl_path}")
         except subprocess.CalledProcessError as e:
             self._logger.error(f"Error generating SSL certificate: {e}")
             raise
@@ -161,12 +163,15 @@ class CaManager:
             Exception: For other validation errors.
         """
         cert_path = cert_path or self._cert_path
-        assert mode in ["openssl", "cryptography"], "Invalid mode. Use 'openssl' or 'cryptography'."
+
+        if mode not in ["openssl", "cryptography"]:
+            self._logger.error("Invalid mode. Use 'openssl' or 'cryptography'.")
+            raise AssertionError("Invalid mode. Use 'openssl' or 'cryptography'.")
 
         if mode == "openssl":
-            self._validate_with_openssl(cert_path, show_details)
+            return self._validate_with_openssl(cert_path, show_details)
         else:
-            self._validate_with_cryptography(cert_path, show_details)
+            return self._validate_with_cryptography(cert_path, show_details)
 
     def _validate_with_openssl(self, cert_path, show_details):
         try:
@@ -188,6 +193,7 @@ class CaManager:
                     self._log_certificate_details(cert, cert_path)
             self._logger.info(f"Certificate {cert_path} is valid (cryptography check).")
             return True
+
         except Exception as e:
             self._logger.error(f"Invalid certificate using cryptography check: {e}")
             raise
@@ -218,14 +224,10 @@ class CaManager:
         # The not valid after date is the end of the period during which
         # the certificate is valid.
 
-    def configure_postgresql_ssl(self, postgresql_conf = None, pg_hba_conf = None,
-                                 cert_path = None, key_path = None, enable_ssl=True):
+    def configure_postgresql_ssl(self, postgresql_conf=None, pg_hba_conf=None,
+                                 cert_path=None, key_path=None, enable_ssl=True):
         """
-        Configure PostgreSQL to use SSL.
-
-        This function will append the necessary configuration to the
-        postgresql.conf and pg_hba.conf files. If you want to disable SSL,
-        you can pass enable_ssl=False.
+        Configure PostgreSQL to use or disable SSL.
 
         Args:
             postgresql_conf (str): Path to the postgresql.conf file.
@@ -239,62 +241,57 @@ class CaManager:
         postgresql_conf = postgresql_conf or self._postgresql_conf
         pg_hba_conf = pg_hba_conf or self._pg_hba_conf
 
-        # Open the postgresql.conf file and read its content
-        with open(postgresql_conf, "r+") as f:
-            content = f.read()
+        def update_postgresql_conf():
+            """Update postgresql.conf to enable or disable SSL."""
+            with open(postgresql_conf, "r+") as f:
+                content = f.read()
 
-            # If we want to enable SSL, make sure the configuration is correct
-            if enable_ssl:
-                # Check if the configuration is already correct
-                if "ssl = off" in content:
-                    # If not, change ssl = off to ssl = on and add the certificate and key paths
-                    content = content.replace("ssl = off", "ssl = on")
-                    content += f"\nssl_cert_file = '{cert_path}'\n"
-                    content += f"ssl_key_file = '{key_path}'\n"
-            else:
-                # If we want to disable SSL, make sure the configuration is correct
-                if "ssl = on" in content:
-                    # If not, change ssl = on to ssl = off and remove the certificate and key paths
+                ssl_enabled = "ssl = on" in content
+                ssl_disabled = "ssl = off" in content
+
+                if enable_ssl and not ssl_enabled:
+                    content = content.replace("ssl = off", "ssl = on") if ssl_disabled else content
+                    content += f"\nssl_cert_file = '{cert_path}'\nssl_key_file = '{key_path}'\n"
+                    f.seek(0)
+                    f.write(content.strip() + "\n")  # Ensure clean formatting
+                    f.truncate()
+                    self._logger.info("SSL enabled in postgresql.conf.")
+
+                elif not enable_ssl and ssl_enabled:
                     content = content.replace("ssl = on", "ssl = off")
                     content = content.replace(f"\nssl_cert_file = '{cert_path}'\n", "")
                     content = content.replace(f"\nssl_key_file = '{key_path}'\n", "")
+                    f.seek(0)
+                    f.write(content.strip() + "\n")
+                    f.truncate()
+                    self._logger.info("SSL disabled in postgresql.conf.")
 
-            # Write the updated configuration to the file
-            f.seek(0)
-            f.write(content)
-            f.truncate()
+        def update_pg_hba_conf():
+            """Update pg_hba.conf to reflect SSL settings."""
+            with open(pg_hba_conf, "r+") as f:
+                content = f.read()
 
-        # Open the pg_hba.conf file and read its content
-        with open(pg_hba_conf, "r+") as f:
-            content = f.read()
-
-            # If we want to enable SSL, make sure the configuration is correct
-            if enable_ssl:
-                # Check if the configuration is already correct
-                if "host all all 0.0.0.0/0 md5" in content:
-                    # If not, change host all all 0.0.0.0/0 md5 to hostssl all all 0.0.0.0/0 md5
+                if enable_ssl and "host all all 0.0.0.0/0 md5" in content:
                     content = content.replace("host all all 0.0.0.0/0 md5", "hostssl all all 0.0.0.0/0 md5")
-            else:
-                # If we want to disable SSL, make sure the configuration is correct
-                if "hostssl all all 0.0.0.0/0 md5" in content:
-                    # If not, change hostssl all all 0.0.0.0/0 md5 to host all all 0.0.0.0/0 md5
+                    f.seek(0)
+                    f.write(content.strip() + "\n")
+                    f.truncate()
+                    self._logger.info("SSL enabled in pg_hba.conf.")
+
+                elif not enable_ssl and "hostssl all all 0.0.0.0/0 md5" in content:
                     content = content.replace("hostssl all all 0.0.0.0/0 md5", "host all all 0.0.0.0/0 md5")
+                    f.seek(0)
+                    f.write(content.strip() + "\n")
+                    f.truncate()
+                    self._logger.info("SSL disabled in pg_hba.conf.")
 
-            # Write the updated configuration to the file
-            f.seek(0)
-            f.write(content)
-            f.truncate()
-
-        # Log the result
-        if enable_ssl:
-            self._logger.info("PostgreSQL SSL configuration enabled successfully.")
-        else:
-            self._logger.info("PostgreSQL SSL configuration disabled successfully.")
+        update_postgresql_conf()
+        update_pg_hba_conf()
 
 
 # if __name__ == "__main__":
 #     # Example usage
 #     ssl_manager = CaManager()
-#     ssl_manager.generate_self_signed_cert()
+#     ssl_manager.generate_cert_with_cryptography()
 #     ssl_manager.validate_certificate()
 #     ssl_manager.configure_postgresql_ssl(enable_ssl=True)
