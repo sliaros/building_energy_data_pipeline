@@ -38,6 +38,11 @@ class DatabaseConfig:
     postgresql_conf: Optional[str] = None
     pg_hba_conf: Optional[str] = None
 
+    def __post_init__(self):
+            if not self.host:
+                raise ValueError("Host cannot be empty")
+
+
 def configure_connection(func):
     """Decorator to apply session-level settings to database connections."""
     @wraps(func)
@@ -79,6 +84,8 @@ class PostgresManager:
             return
 
         self.db_config = db_config
+        if not self.db_config.host:
+            raise ValueError("Host cannot be empty")
         self.default_db_config = default_db_config
 
         self._logger = db_config.logger or logging.getLogger(self.__class__.__name__)
@@ -150,6 +157,7 @@ class PostgresManager:
                 self._pool.putconn(conn)
         except Exception as e:
             self._logger.error(f"Failed to return connection to pool: {e}")
+            raise
 
     @contextmanager
     def connection_context(self):
@@ -358,22 +366,31 @@ class PostgresManager:
         )
 
     # Query Management Methods
-    def execute_query(self, query: str, params: Optional[tuple] = None, fetch_all: bool = True) -> Union[
-        List[Dict], Dict, None]:
+    def execute_query(
+            self, query: str, params: Optional[tuple] = None, fetch_all: bool = True
+    ) -> Union[List[Dict], Dict, int, None]:
         """Execute a query with proper error handling and logging."""
         start_time = datetime.now()
         try:
             with self.connection_context() as conn:
                 with conn.cursor(cursor_factory=DictCursor) as cur:
                     cur.execute(query, params)
-                    if cur.description:  # Select query
+
+                    # Handle SELECT queries or DML queries with RETURNING
+                    if cur.description:
                         result = cur.fetchall() if fetch_all else cur.fetchone()
+                        if result is None:
+                            return None
                         result = [dict(row) for row in result] if fetch_all else dict(result)
-                    else:  # DML query
+                    else:
+                        # Handle DML queries
                         result = cur.rowcount
                         conn.commit()
+
+                    # Log the query
                     execution_time = (datetime.now() - start_time).total_seconds()
                     self._log_query(query, params, execution_time)
+
                     return result
         except Exception as e:
             self._logger.error(f"Query execution failed: {str(e)}")
@@ -587,7 +604,7 @@ class PostgresManager:
         result = self._cached_query(query_hash, fetch_all)
         execution_time = time.time() - start_time
 
-        self._log_query(query, params, execution_time, cached=True)
+        self._log_query(query, params, execution_time)
         return result
 
     def clear_query_cache(self):
