@@ -12,7 +12,7 @@ def setup_logging(log_file=None, max_bytes=5*1024*1024, backup_count=3):
         backup_count (int): Number of backup files to keep (default: 3).
     """
     """Configure logging using values from ConfigManager."""
-    log_file = log_file or Path('logs/application.log')
+    log_file = log_file or Path.cwd().joinpath('logs/application.log')
 
     # Create a custom logger
     logger = logging.getLogger()

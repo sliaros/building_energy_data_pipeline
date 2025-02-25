@@ -1,4 +1,5 @@
 import logging
+import os
 from typing import Dict, Any
 from src.data_extraction.data_extractor import DataExtractor
 from src.data_loading.data_loader import PostgresDataLoader
@@ -14,9 +15,6 @@ import atexit
 class Orchestrator:
 
     def __init__(self, database_name:str = None):
-        """
-        Initializes the Orchestrator object.
-        """
 
         """Initializes the Orchestrator with configurations from ConfigManager."""
         self.config_manager = ConfigManager(

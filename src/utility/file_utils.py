@@ -354,3 +354,8 @@ class FileUtils:
 
             raise ValueError(f"Unsupported file type: {suffix}")
 
+if __name__ == "__main__":
+    file_utils = FileUtils()
+    files_found = file_utils.find_folders_with_extension('../','yaml')
+    print(files_found)
+    pass
